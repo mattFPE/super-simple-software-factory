@@ -160,7 +160,9 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
             session_dir=str((agent_dir / f"{agent.coding_agent}_sessions").resolve()),
             raw_output_path=str((agent_dir / "raw_output.jsonl").resolve()),
             tools=agent.tools,
-            extensions=agent.harness_engineering,
+            # absolute, like the paths above: they live in THIS checkout, and the
+            # agent's cwd may be a worktree where a relative path means something else
+            extensions=[str(Path(e).resolve()) for e in agent.harness_engineering],
             cwd=str(run.repo_root),
             idle_timeout_seconds=agent.idle_timeout_seconds,
         )

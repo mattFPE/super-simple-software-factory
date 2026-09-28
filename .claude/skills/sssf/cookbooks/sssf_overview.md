@@ -26,6 +26,8 @@ adws/
 │   ├── agent_pi.py              Pi interface        ·   agent_cc.py  Claude Code interface
 │   ├── gates.py                 gate(envelope, run) -> GateReport — one check per item verified
 │   ├── changes.py               git diff vs a resolved base → ChangeSet → envelope for the documenter
+│   ├── worktree.py              a committing run's own worktree + branch sssf/<adw_id>; lands as branch/merge/PR
+│   ├── quality.py, procs.py     known commands from config · agent idle watchdog + process-tree kill
 │   ├── prompts.py, session.py, tracer.py, console.py, git_helper.py, utils.py
 └── adw_data/
     ├── prompt_engineering/{agent}/{system.md,user.md}   tracked — edit prompts HERE, never in the skill
@@ -36,6 +38,8 @@ adws/
     │   └── {agent}/{prompts/, raw_output.jsonl, envelope.json}
     └── sssf.db                  gitignored SQLite trace db the visualizer polls
 ```
+
+**Committing chains run in a worktree.** Anything that ends in a commit works in `../<repo>.sssf-worktrees/<adw_id>` on branch `sssf/<adw_id>`, never in the engineer's checkout; the trace, config and prompts stay in the checkout. `--merge` / `--pr` decide how it lands; `--in-place` opts out.
 
 **Two coding agents.** `coding_agent: pi` (default model `gemini-3.6-flash`, thinking `medium`) or `coding_agent: claude_code` with a Claude model. Both take a `PiRequest` and return a `PiResult`, so ADWs never know which ran.
 

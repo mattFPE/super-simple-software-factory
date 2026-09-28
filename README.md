@@ -203,9 +203,9 @@ with run.phase(PhaseParams(name="plan", kind="agent", owner="planner",
                              gates=[gates.artifacts_exist, gates.files_non_empty]))
 
 with run.phase(PhaseParams(name="commit", kind="code", owner="git",
-                           description="Commit the working tree")) as ph:
+                           description="Land the builder's changes, using the message it wrote")) as ph:
     message = build.commit_message or f"sssf({run.adw_id}): {build.summary}"
-    ph.log(sha=git_helper.commit_all(message), message=message)
+    ph.log(sha=git_helper.commit_all(message, run.repo_root), message=message)
 
 return run.finish(accepted=review.approved, reason="the reviewer never approved")
 ```
@@ -354,7 +354,7 @@ Honest edges, because knowing them is cheaper than discovering them.
 | Failure | What actually happens | What to do |
 |---|---|---|
 | No test command configured | `quality:` in `sssf.config.yaml` ships unset, and unset is never a pass. Every ADW with a test phase declares `REQUIRED_QUALITY` and refuses to start, before any agent spawns, until `quality.test` is set and its program is on PATH | Set `quality.test` (and optionally `lint`, `typecheck`, `build`) to your real argv. This is the first thing to customize |
-| Uncommitted work when a committing ADW starts | The commit phase stages with `git add -A`, so it would sweep your own edits into the agents' commit. ADWs that commit refuse a dirty tree, or a non-repo, before any agent spawns | Commit or stash first. `--allow-dirty` includes the changes on purpose |
+| Your uncommitted work and a committing ADW | ADWs that commit run in their own git worktree of HEAD, on branch `sssf/<adw_id>` in `../<repo>.sssf-worktrees/`, so they never see or commit your uncommitted edits, and parallel runs never collide. A successful run ends as a branch (default), `--merge` or `--pr`, and removes its worktree. A failed or rejected one keeps it, and rerunning with the same `--adw-id` picks it back up | Commit what you want the run to build on. Prepare fresh worktrees with `worktree: {copy: [.env], setup: [[bun, install]]}`. `--in-place` works in your checkout instead, refusing a dirty tree unless `--allow-dirty` |
 | A coding agent hangs | An idle watchdog kills the agent's whole process tree (`taskkill /T` on Windows, the process group elsewhere) after `idle_timeout_seconds` with no output, default 600, and the phase fails saying so. The tree is also killed whenever the ADW exits early | Raise `idle_timeout_seconds` (per agent, or in `defaults`; `0` disables) for an agent that legitimately works in silence, such as one running a long test suite |
 | A run dies without closing its trace | A hard kill (every kill on Windows), a crash or a reboot leaves the session reading `running`. The next run's startup sweeps any `running` session whose process is gone and closes it as `fail` with an `abandoned` event | Nothing. It is reported on the console when it happens |
 | Model names differ between machines | The same model is `openai-codex/…` under a ChatGPT login and `openai/…` under an API key, and a bare pattern like `gemini-3.6-flash` matches several providers, so `agents.validate()` refuses | Write `provider/model-id`, or a list of candidates in preference order: `model: [openai-codex/gpt-5.6-terra, openai/gpt-5.6-terra]`. The first that resolves on this machine wins |
@@ -365,7 +365,7 @@ Honest edges, because knowing them is cheaper than discovering them.
 | Refreshing stamped code | `install.py` records a hash of every file it writes in `adws/.sssf_stamp.json`. `--force` refreshes only files you have not modified since they were stamped, and lists the ones it kept | Merge kept files by hand against the skill's `templates/`, or `--force-all` to overwrite everything, your edits included |
 | `just` is not installed | The stamped `justfile` is a convenience wrapper, nothing depends on it. On Windows it needs only `git` on PATH, recipes run through Git's bundled `sh` | Every recipe is a one-line `uv run` or `sqlite3` command. Open the justfile and run the line yourself |
 
-Also missing on purpose, so you know what to add: this runs on your current branch. For real work you want a branch per run, a sandbox around the agent, and a merge step at the end.
+Also missing on purpose, so you know what to add: a sandbox around the agent. A worktree isolates a run by working directory, not by permission, so an agent that `cd`s into your checkout can still write there. The factory deliberately does not police your checkout, because you may be editing it while the run works.
 
 **Is this overkill for a one-off feature?** Yes. Prompt an agent and move on. This earns its keep when the same workflow runs a hundred times, when validation is the only thing standing between you and a bad merge, and when you need the thousandth run to look like the first.
 
@@ -388,7 +388,7 @@ Where to start, roughly in the order that pays off fastest:
 | Your definition of done | `adws/adw_modules/gates.py` | A gate is one function. Whatever "done" means where you work, write it here |
 | Your agent capabilities | `adws/adw_data/harness_engineering/` | Pi extensions, a different set per agent if that is what the job needs |
 
-And what it deliberately does not do. It runs on your current branch. There is no sandbox, no branch per run, no merge step, no cloud, and no human-in-the-loop approval phase. Those are the obvious next things to build. They are left out so the core stays small enough to read in one sitting, which is the only reason you would trust it enough to change it.
+And what it deliberately does not do. There is no sandbox (worktrees isolate by directory, not permission), no cloud, and no human-in-the-loop approval phase. Those are the obvious next things to build. They are left out so the core stays small enough to read in one sitting, which is the only reason you would trust it enough to change it.
 
 So take it. Fork it, strip the parts you do not need, rename the agents, throw out half the workflows, and roll what is left into the factory your product actually needs. The specific chains in here matter far less than the shape: code owns the loop, agents own the phases, and every run leaves a trace you can go read.
 

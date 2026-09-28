@@ -5,7 +5,11 @@
 """ADW Plan Build — two-agent chain: planner -> envelope -> builder.
 
 Usage:
-    uv run adws/adw_plan_build.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4] [--allow-dirty]
+    uv run adws/adw_plan_build.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
+        [--merge | --pr] [--in-place [--allow-dirty]]
+
+Runs in its own worktree on branch sssf/<adw_id> (see adw_modules/worktree.py);
+your checkout is never touched. --in-place works in your checkout instead.
 
 Phases: engineer(request) -> planner -> builder -> git(commit)
 """
@@ -13,22 +17,23 @@ Phases: engineer(request) -> planner -> builder -> git(commit)
 import argparse
 import sys
 
-from adw_modules import agents, gates, git_helper, session, utils
-from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutput
+from adw_modules import agents, gates, git_helper, session, utils, worktree
+from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutput, RunOptions
 
 REQUIRED_AGENTS = ["planner", "builder"]
 
 
-def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None,
-         allow_dirty: bool = False) -> int:
-    cfg = agents.load_config(config)
+def main(prompt: str, opts: RunOptions) -> int:
+    cfg = agents.load_config(opts.config)
     agents.validate(cfg, REQUIRED_AGENTS)
-    git_helper.require_committable(allow_dirty)   # this run ends in a commit
-    run = session.ensure(cfg, adw_id)
+    worktree.preflight(opts)              # this run ends in a commit
+    run = session.ensure(cfg, opts.adw_id)
 
     with run.phase(PhaseParams(name="request", kind="engineer", owner=run.engineer,
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt)
+
+    worktree.enter(run, opts)             # no-op with --in-place
 
     with run.phase(PhaseParams(name="plan", kind="agent", owner="planner",
                                description="Turn the request into an implementable plan")) as ph:
@@ -43,17 +48,15 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
     with run.phase(PhaseParams(name="commit", kind="code", owner="git",
                                description="Land the builder's changes, using the message it wrote")) as ph:
         message = build.commit_message or f"sssf({run.adw_id}): {build.summary}"
-        ph.log(sha=git_helper.commit_all(message), message=message)
+        ph.log(sha=git_helper.commit_all(message, run.repo_root), message=message)
 
+    worktree.land(run, opts)              # branch / merge / PR; no-op in place
     return run.finish()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", help="inline text or a path to a prompt file")
-    parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
-    parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="start even with uncommitted changes; they land in this run's commit")
+    session.add_cli_args(parser, commits=True)
     args = parser.parse_args()
-    sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id, args.allow_dirty))
+    sys.exit(main(utils.resolve_prompt(args.prompt), session.cli_options(args)))

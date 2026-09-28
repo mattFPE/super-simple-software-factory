@@ -24,7 +24,8 @@ Extend `adws/adw_modules/` with new low-level logic.
 | `tracer.py` | append JSONL **and** insert every event into `sssf.db` as it happens |
 | `console.py` | the terminal narrative — every line printed also lands in the db as a `log` event, so the UI reads the same story; plain sequential lines, no spinners |
 | `console.py` | the rich stdout reporter — every line printed is ALSO traced as a `log` event (`{message, level}`) so the terminal and the swim-lane UI tell the same story |
-| `git_helper.py` | branch, status, diff, commit — the raw plumbing `changes.py` composes |
+| `git_helper.py` | branch, status, diff, commit — the raw plumbing `changes.py` composes. Every function takes `repo`: pass `run.repo_root` |
+| `worktree.py` | a committing run's own worktree: `preflight(opts)`, `enter(run, opts)` repoints `run.repo_root` (with the config's `worktree: {copy, setup}`), `land(run, opts)` ends it as a branch, merge or PR |
 | `utils.py` | safe subprocess env, logging, `resolve_prompt` |
 
 ## Never `print()`

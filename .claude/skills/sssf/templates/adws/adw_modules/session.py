@@ -13,7 +13,7 @@ import signal
 import sys
 from pathlib import Path
 
-from .data_types import SSSFConfig
+from .data_types import RunOptions, SSSFConfig
 from .runner import Run
 from .tracer import Tracer
 from .utils import engineer_name, new_id, pid_alive
@@ -62,3 +62,39 @@ def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
         run.console.note(f"closed {len(abandoned)} abandoned run(s) as failed: "
                          + ", ".join(abandoned))
     return run
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def add_cli_args(parser, commits: bool = False) -> None:
+    """The flags every ADW shares; `commits=True` adds the worktree/landing ones."""
+    parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
+    parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
+    if not commits:
+        return
+    parser.add_argument("--in-place", action="store_true",
+                        help="work and commit in your checkout instead of a worktree "
+                             "(needs a clean tree)")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="with --in-place: start anyway; your changes land in the commit")
+    land = parser.add_mutually_exclusive_group()
+    land.add_argument("--merge", action="store_true",
+                      help="after the commit, merge the run's branch into the one you started from")
+    land.add_argument("--pr", action="store_true",
+                      help="after the commit, push the run's branch and open a PR with gh")
+
+
+def cli_options(args) -> RunOptions:
+    opts = RunOptions(
+        config=args.config, adw_id=args.adw_id,
+        in_place=getattr(args, "in_place", False),
+        allow_dirty=getattr(args, "allow_dirty", False),
+        land=("merge" if getattr(args, "merge", False)
+              else "pr" if getattr(args, "pr", False) else "branch"))
+    if opts.allow_dirty and not opts.in_place:
+        raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "
+                         "from your last commit and never sees your uncommitted changes")
+    if opts.in_place and opts.land != "branch":
+        raise SystemExit("--merge / --pr end a worktree run; with --in-place the commit is "
+                         "already on your branch")
+    return opts

@@ -21,6 +21,8 @@ uv run adws/<build-first-chain>.py "implement the plan" --adw-id a1b2c3d4
 uv run adws/<recon-chain>.py "where is auth handled" --config path/to/other.config.yaml
 ```
 
+**A chain that commits runs in its own worktree** (`../<repo>.sssf-worktrees/<adw_id>`, branch `sssf/<adw_id>`) and never touches the engineer's checkout. It builds on their last commit, not on uncommitted edits, so say so if they have some. It ends as a branch unless they asked for `--merge` or `--pr`; `--in-place` is the old behaviour. After a run, report the branch and how to take it (`git merge sssf/<id>`), and on failure where the kept worktree is.
+
 The prompt is inline text or a file path. Launch in the background so you can poll while it works; the `adw_id` is printed on startup — capture it, everything else keys off it.
 
 ### Listen for the roster

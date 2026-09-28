@@ -48,6 +48,14 @@ quality:
   build:                           # e.g. [bun, run, build]
   timeout_seconds: 600             # per command
 
+# Committing ADWs run in their own git worktree of HEAD, on branch sssf/<adw_id>,
+# in ../<repo>.sssf-worktrees/ (--in-place opts out). A worktree is a clean
+# checkout: none of your gitignored installs or secrets. Say how to prepare one,
+# once per repo. `copy` comes from your checkout; `setup` then runs in the worktree.
+worktree:
+  copy: []                         # e.g. [.env]
+  setup: []                        # e.g. [[bun, install]]  or  [[uv, sync]]
+
 agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3

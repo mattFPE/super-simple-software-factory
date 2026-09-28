@@ -5,7 +5,11 @@
 """ADW Simple SDLC — plan, build, test, review, document, committing as it goes.
 
 Usage:
-    uv run adws/adw_simple_sdlc.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4] [--allow-dirty]
+    uv run adws/adw_simple_sdlc.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
+        [--merge | --pr] [--in-place [--allow-dirty]]
+
+Runs in its own worktree on branch sssf/<adw_id> (see adw_modules/worktree.py);
+your checkout is never touched. --in-place works in your checkout instead.
 
 Phases: engineer(request) -> planner -> git(commit_plan)
         -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded]
@@ -44,10 +48,9 @@ pinned before the first commit phase and printed in the request phase.
 import argparse
 import sys
 
-from adw_modules import agents, changes, gates, git_helper, quality, session, utils
-from adw_modules.data_types import (AgentCall, BuildOutput, ChangeCapture,
-                                    DocumentOutput, PhaseParams, PlanOutput,
-                                    ReviewOutput)
+from adw_modules import agents, changes, gates, git_helper, quality, session, utils, worktree
+from adw_modules.data_types import (AgentCall, BuildOutput, ChangeCapture, DocumentOutput,
+                                    PhaseParams, PlanOutput, ReviewOutput, RunOptions)
 
 REQUIRED_AGENTS = ["planner", "builder", "reviewer", "documenter"]
 REQUIRED_QUALITY = ["test"]           # validate() refuses to start without it
@@ -59,18 +62,17 @@ DOCUMENT_NOTES = ("Read diff_path in full before writing. Document only what the
                   "describes.")
 
 
-def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None,
-         allow_dirty: bool = False) -> int:
-    cfg = agents.load_config(config)
+def main(prompt: str, opts: RunOptions) -> int:
+    cfg = agents.load_config(opts.config)
     agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_QUALITY)
-    git_helper.require_committable(allow_dirty)   # this run ends in a commit
-    run = session.ensure(cfg, adw_id)
+    worktree.preflight(opts)              # this run ends in a commit
+    run = session.ensure(cfg, opts.adw_id)
     baseline = git_helper.rev("HEAD")     # pinned before this run commits anything
 
     def commit(ph, envelope) -> None:
         """Commit what the preceding phase produced, in that agent's own words."""
         message = envelope.commit_message or f"sssf({run.adw_id}): {envelope.summary}"
-        ph.log(sha=git_helper.commit_all(message), message=message)
+        ph.log(sha=git_helper.commit_all(message, run.repo_root), message=message)
 
     def record(ph, result) -> None:
         """Log a deterministic block's verdict — the same shape every ADW uses."""
@@ -81,6 +83,10 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
     with run.phase(PhaseParams(name="request", kind="engineer", owner=run.engineer,
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt, baseline=git_helper.short_sha(baseline))
+
+    worktree.enter(run, opts)             # no-op with --in-place
+    if run.worktree:                      # a reused worktree may already hold commits:
+        baseline = run.worktree["base_sha"]   # measure from where its branch started
 
     with run.phase(PhaseParams(name="plan", kind="agent", owner="planner",
                                description="Turn the request into an implementable plan")) as ph:
@@ -173,16 +179,16 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                    description="Ship the write-up in its own commit, beside the code it describes")) as ph:
             commit(ph, document)
 
-    return run.finish(accepted=verified,
+    accepted = verified
+    if accepted:                          # never merge or PR work that was not accepted;
+        worktree.land(run, opts)          # a rejected run keeps its worktree to inspect
+    return run.finish(accepted=accepted,
                       reason="the suite or the review never came back clean")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", help="inline text or a path to a prompt file")
-    parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
-    parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="start even with uncommitted changes; they land in this run's commit")
+    session.add_cli_args(parser, commits=True)
     args = parser.parse_args()
-    sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id, args.allow_dirty))
+    sys.exit(main(utils.resolve_prompt(args.prompt), session.cli_options(args)))

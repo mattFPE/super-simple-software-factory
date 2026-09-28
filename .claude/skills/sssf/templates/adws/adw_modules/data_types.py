@@ -361,6 +361,31 @@ class QualityConfig(BaseModel):
     timeout_seconds: int = 600
 
 
+class WorktreeConfig(BaseModel):
+    """How a fresh worktree is made ready to work in. Once per repo, like `quality`.
+
+    A worktree is a clean checkout of the last commit: none of the gitignored
+    things a real checkout accumulates — installed dependencies, `.env` — so a
+    test command that works in your checkout can fail in one. `copy` brings
+    files over from your checkout; `setup` then runs, in the worktree, in order.
+    """
+    model_config = {"populate_by_name": True}
+    # `copy:` in the YAML; not the attribute name, which would shadow BaseModel.copy
+    copy_files: list[str] = Field(default_factory=list, alias="copy")   # e.g. [.env]
+    setup: list[list[str]] = Field(default_factory=list)   # e.g. [[bun, install]]
+
+
+class RunOptions(BaseModel):
+    """How an ADW was asked to run — the CLI flags, as one object (rule 4)."""
+    config: str = "adws/adw_sssf_config/sssf.config.yaml"
+    adw_id: Optional[str] = None
+    # Committing ADWs only. Default: a worktree of HEAD on branch sssf/<adw_id>,
+    # so the run never touches your checkout. in_place = the old behaviour.
+    in_place: bool = False
+    allow_dirty: bool = False                               # in place only
+    land: Literal["branch", "merge", "pr"] = "branch"       # what happens after the commit
+
+
 class ObservabilityConfig(BaseModel):
     db: str = "adws/adw_data/sssf.db"
     poll_ms: int = 500
@@ -370,6 +395,7 @@ class SSSFConfig(BaseModel):
     defaults: ConfigDefaults = Field(default_factory=ConfigDefaults)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
+    worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
 
 

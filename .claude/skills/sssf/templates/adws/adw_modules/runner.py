@@ -51,8 +51,12 @@ class Run:
         self.cost = 0.0
         self.finalized = False       # the session row has its final status
         self._seq = tracer.max_phase_seq(adw_id)   # a joined run continues the sequence
-        self.repo_root = git_helper.repo_root()    # where every agent is spawned to work
-        self.session_dir = ensure_dir(Path(cfg.defaults.data_dir) / "sessions" / adw_id)
+        self.repo_root = git_helper.repo_root()    # where every agent is spawned to work;
+        self.main_root = self.repo_root            # the engineer's checkout, always
+        self.worktree = None                       # worktree.isolated() repoints repo_root
+        # Absolute: agents may work in a worktree elsewhere (worktree.py), and their
+        # reports still have to land in THIS checkout's session folder.
+        self.session_dir = ensure_dir((Path(cfg.defaults.data_dir) / "sessions" / adw_id).resolve())
         self.context_handoff_dir = ensure_dir(self.session_dir / "context_handoff")
         self._agent_map_path = self.session_dir / "agent_map.json"
         self.agent_map: dict = (json.loads(self._agent_map_path.read_text())

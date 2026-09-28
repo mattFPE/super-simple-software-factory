@@ -74,6 +74,17 @@ quality:
   lint: [uv, run, ruff, check, .]
 ```
 
+### `worktree`
+
+Committing ADWs run in their own git worktree: a clean checkout of HEAD on branch `sssf/<adw_id>`, in `../<repo>.sssf-worktrees/<adw_id>` (a sibling, so your own test runners never see a second copy of the code). A clean checkout has none of your gitignored state, so say once per repo how to prepare one:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `copy` | list[string] | Paths copied from your checkout into each new worktree, e.g. `[.env]`. Missing ones are noted and skipped. |
+| `setup` | list[argv] | Commands run in the worktree, in order, after `copy`, e.g. `[[bun, install]]`. A failure fails the `worktree` phase and keeps the worktree. Both run again when a failed run's worktree is reused, so keep them repeatable. |
+
+The CLI decides how a run ends: the branch stays (default), `--merge` merges it into the branch you started from, `--pr` pushes it and opens a PR with `gh`. `--in-place` skips the worktree entirely. `just worktrees` lists them, `just worktree-rm <adw_id>` removes one (its branch stays).
+
 ### `agents[]`
 
 | Field | Required | Meaning |

@@ -42,6 +42,7 @@ demo:
 
 # ── run a workflow ──────────────────────────────────────────────────────────
 # Args pass straight through: "<prompt or path/to/prompt.md>" [--adw-id X]
+# Committing ones also take --merge | --pr, or --in-place [--allow-dirty].
 
 # one agent, one prompt: just prompt "summarize this repo"
 prompt *ARGS:
@@ -85,6 +86,18 @@ tail ADW_ID:
 # what a run has alive right now, with pids: just procs <adw_id>
 procs ADW_ID:
     @sqlite3 {{db}} "select kind, name, pid, command, started_at from processes where adw_id='{{ADW_ID}}' and ended_at is null order by id;"
+
+# ── worktrees ───────────────────────────────────────────────────────────────
+# Committing workflows run in ../<repo>.sssf-worktrees/<adw_id> on branch
+# sssf/<adw_id>. A successful run removes its worktree; a failed one keeps it.
+
+# every worktree, with its branch
+worktrees:
+    @git worktree list
+
+# remove a run's worktree; its branch and commits stay: just worktree-rm <adw_id>
+worktree-rm ADW_ID:
+    git worktree remove --force '{{parent_directory(justfile_directory())}}/{{file_name(justfile_directory())}}.sssf-worktrees/{{ADW_ID}}'
 
 # ── observability UI ────────────────────────────────────────────────────────
 

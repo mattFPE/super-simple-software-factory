@@ -61,22 +61,23 @@ Every `adw_*.py`, generated or hand-written, is a `uv` single-file script with t
 import argparse
 import sys
 
-from adw_modules import agents, gates, git_helper, session, utils
-from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutput
+from adw_modules import agents, gates, git_helper, session, utils, worktree
+from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutput, RunOptions
 
 REQUIRED_AGENTS = ["planner", "builder"]        # names, never models
 
 
-def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None,
-         allow_dirty: bool = False) -> int:
-    cfg = agents.load_config(config)            # 1. point to config
+def main(prompt: str, opts: RunOptions) -> int:
+    cfg = agents.load_config(opts.config)       # 1. point to config
     agents.validate(cfg, REQUIRED_AGENTS)       # 2. fail fast — nothing spawns on a half-valid config
-    git_helper.require_committable(allow_dirty) #    this chain ends in a commit: clean tree or --allow-dirty
-    run = session.ensure(cfg, adw_id)           # 3. pin-or-create the session → the Run object
+    worktree.preflight(opts)                    #    this chain commits: repo + HEAD (or a clean tree in place)
+    run = session.ensure(cfg, opts.adw_id)      # 3. pin-or-create the session → the Run object
 
     with run.phase(PhaseParams(name="request", kind="engineer", owner=run.engineer,
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt)
+
+    worktree.enter(run, opts)                   # 4. own worktree + branch sssf/<adw_id>; no-op --in-place
 
     with run.phase(PhaseParams(name="plan", kind="agent", owner="planner",
                                description="Turn the request into an implementable plan")) as ph:
@@ -89,34 +90,33 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                   gates=[gates.diff_matches_claims]))
 
     with run.phase(PhaseParams(name="commit", kind="code", owner="git",
-                               description="Commit the working tree")) as ph:
+                               description="Land the builder's changes, using the message it wrote")) as ph:
         message = build.commit_message or f"sssf({run.adw_id}): {build.summary}"
-        ph.log(sha=git_helper.commit_all(message), message=message)
+        ph.log(sha=git_helper.commit_all(message, run.repo_root), message=message)
 
+    worktree.land(run, opts)                    # 5. branch / --merge / --pr, worktree removed
     return run.finish()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", help="inline text or a path to a prompt file")
-    parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
-    parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="start even with uncommitted changes; they land in this run's commit")
+    session.add_cli_args(parser, commits=True)  # --config --adw-id, + --merge|--pr, --in-place [--allow-dirty]
     args = parser.parse_args()
-    sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id, args.allow_dirty))
+    sys.exit(main(utils.resolve_prompt(args.prompt), session.cli_options(args)))
 ```
 
 ## Non-negotiables
 
 - **`REQUIRED_AGENTS` + `agents.validate()`** — declare every agent name the script uses and validate before the first phase. An ADW with a quality phase also declares `REQUIRED_QUALITY = ["test"]` and passes it: `agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_QUALITY)`.
-- **An ADW that ends in a commit calls `git_helper.require_committable(allow_dirty)` right after validating**, and takes an `--allow-dirty` flag. `commit_all` stages with `git add -A`, so without the preflight the engineer's own uncommitted work lands in the agents' commit.
+- **An ADW that ends in a commit runs in a worktree.** It takes `session.add_cli_args(parser, commits=True)`, calls `worktree.preflight(opts)` right after validating, `worktree.enter(run, opts)` right after the request phase, and `worktree.land(run, opts)` after its last commit, only when the run is accepted. It never merges or opens a PR for work that failed. The run then works on branch `sssf/<adw_id>` in `../<repo>.sssf-worktrees/<adw_id>`, and the engineer's checkout is never its working directory. `--in-place` restores the old behaviour, where preflight demands a clean tree because `commit_all` stages with `git add -A`.
+- **Anything that touches the codebase goes through `run.repo_root`**: `git_helper.*(…, run.repo_root)`, gates, quality, permissions. Relative paths in the ADW process resolve against YOUR checkout (config, prompts, trace), which is only the same place when the run is in place.
 - **Every agent call declares a concrete output type** from `data_types.py`. No untyped handoffs.
 - **`previous=` carries the chain** — the upstream envelope lands in the next agent's `user.md` as `{{previous_envelope}}`; bulky context moves through `context_handoff/` files the envelope references.
 - **The engineer request phase comes first**, always.
 - **Four-param rule** — `run.phase()` and `ph.call()` each take exactly one object; new helpers with >4 params get a data type.
 - **Stay thin** — sequencing and acceptance only; real logic goes in `adw_modules/` (`update_modules.md`).
-- **Committing is a code phase, and it needs a fallback.** `PlanOutput`, `BuildOutput`, and `DocumentOutput` each carry a `commit_message` the agent writes **for its own work product** — the spec, the code, the write-up. It defaults to empty, so always `envelope.commit_message or <fallback>`, and commit each product with the message of the agent that made it (`adw_simple_sdlc.py` commits three times and never crosses them). `git_helper.commit_all(message)` stages everything, commits, and returns the short sha; it raises a clear error when the cwd isn't a git repo or nothing changed, and that raise fails the phase.
+- **Committing is a code phase, and it needs a fallback.** `PlanOutput`, `BuildOutput`, and `DocumentOutput` each carry a `commit_message` the agent writes **for its own work product** — the spec, the code, the write-up. It defaults to empty, so always `envelope.commit_message or <fallback>`, and commit each product with the message of the agent that made it (`adw_simple_sdlc.py` commits three times and never crosses them). `git_helper.commit_all(message, run.repo_root)` stages everything in the run's checkout, commits, and returns the short sha; it raises a clear error when the cwd isn't a git repo or nothing changed, and that raise fails the phase.
 
 ## Before you ship it
 
