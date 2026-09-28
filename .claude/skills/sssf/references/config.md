@@ -42,11 +42,11 @@ agents:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `coding_agent` | `pi` \| `claude_code` | Which interface runs the agent. **v1 implements `pi` only**; `claude_code` is specced and stubbed in `agent_cc.py`, landing in v2. |
-| `model` | string | Model id. For Pi, any id registered in `~/.pi/agent/models.json`. Default `gemini-3.6-flash`. |
+| `coding_agent` | `pi` \| `claude_code` | Which interface runs the agent: `agent_pi.py` or `agent_cc.py`. Mixable per agent. See [Claude Code agents](#claude-code-agents). |
+| `model` | string | Model id. For Pi, any id registered in `~/.pi/agent/models.json`. For Claude Code, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a `claude-*` id. Default `gemini-3.6-flash`. |
 | `thinking` | enum | Reasoning effort — see below. Default `medium`. |
 | `color` | hex string | Lane color for every agent that does not set its own. Default empty — the visualizer falls back to its own palette. |
-| `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension names. Claude Code: reserved (MCP, hooks). |
+| `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension files (`-e`). Claude Code: plugin directories (`--plugin-dir`); a `.ts` pi extension fails validation. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
 | `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py` — an agent must not be able to edit the machinery that decides whether its work passed. |
 | `data_dir` | path | Runtime home. Sessions land at `{data_dir}/sessions/{adw_id}/{agent_name}/`. Default `adws/adw_data`. |
@@ -71,6 +71,17 @@ agents:
 | `tools` | no | Allowlist. **Omitting the key means all tools usable.** A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. Naming a `protected_files` path here is what unlocks it. **The session runtime under `data_dir` is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
 
+### Claude Code agents
+
+Set `coding_agent: claude_code` on an agent (or in `defaults`) and give it a Claude `model`. It runs `claude -p --output-format stream-json`, streams into the trace exactly like pi, and returns the same `PiResult`. What differs:
+
+- **Auth** is whatever `claude` already uses — your login or `ANTHROPIC_API_KEY`. `CLAUDE_CODE_PATH` overrides the binary.
+- **`tools`** keep pi's names and are translated: `read`→`Read`, `bash`→`Bash`/`PowerShell` (Windows exposes only the latter), `edit`, `write`, `grep`→`Grep`, `find`/`ls`→`Glob`, `subagent_*`→`Agent`. Any other name passes through, so Claude Code tool names (`WebFetch`) work directly. Omit `tools` for Claude Code's full default set.
+- **`thinking`** maps to `--effort`; `off` and `minimal` become `low`, Claude Code's floor.
+- **Permissions**: the agent runs with `--permission-mode bypassPermissions` — `tools` limits capability and `writes` is enforced after the call, as for pi. `--strict-mcp-config` and `--disable-slash-commands` keep your MCP servers and skills out of the agent. Your settings, hooks and `CLAUDE.md` still load.
+- **Sessions**: the SSSF session id maps to a stable UUID; the first send creates it (`--session-id`), later sends `--resume` it. State lives in `{agent}/claude_code_sessions/`.
+- **Cost** is Claude Code's `modelUsage`, billed per send as a delta (resume reports session totals). Per-component costs are 0; `total_cost` is exact.
+
 Output types are deliberately absent: config defines who an agent *is*; the ADW call site defines how it's *used*. One agent serves many calls — same system prompt, different user prompt + output type per call.
 
 ## Defaults merging
@@ -85,7 +96,7 @@ Pi's reasoning-effort ladder, lowest to highest:
 off | minimal | low | medium | high | xhigh | max
 ```
 
-Mapped to Pi's reasoning effort control and honored when the model is registered with `reasoning: true` in `~/.pi/agent/models.json`. On a non-reasoning model the setting is inert — no error, no effect. Rough guidance: `high`/`xhigh` for planners and reviewers, `medium` for builders, `low` for mechanical read-and-report agents. (For Claude Code in v2, the same field maps to the thinking budget.)
+Mapped to Pi's reasoning effort control and honored when the model is registered with `reasoning: true` in `~/.pi/agent/models.json`. On a non-reasoning model the setting is inert — no error, no effect. Rough guidance: `high`/`xhigh` for planners and reviewers, `medium` for builders, `low` for mechanical read-and-report agents. For Claude Code the field maps to `--effort` (`low`…`max`); `off` and `minimal` become `low`.
 
 ## Model resolution
 
@@ -197,6 +208,6 @@ Rule: **every entry in `harness_engineering` that registers a tool must have tha
 
 ## Harness engineering
 
-`harness_engineering` entries are pi extension **file paths**, passed through as `pi -e <path>`, one flag per entry, scoped to that agent only. This is where per-agent harness changes live — e.g. an output-tightening extension for an agent that keeps wrapping its envelope in prose. The starter roster ships with none. On Claude Code the field is reserved for MCP config and hooks in v2.
+`harness_engineering` entries are pi extension **file paths**, passed through as `pi -e <path>`, one flag per entry, scoped to that agent only. This is where per-agent harness changes live — e.g. an output-tightening extension for an agent that keeps wrapping its envelope in prose. The starter roster ships with none. On Claude Code, entries are plugin **directories**, passed as `--plugin-dir <path>`; a pi `.ts` extension fails validation. Subagents need no extension there — `subagent_*` in `tools` maps to the built-in `Agent` tool.
 
 **If the extension registers a tool, name that tool in the agent's `tools` list too** — `--tools` filters extension tools exactly like builtins, so an unnamed extension tool is silently unavailable no matter that the extension loaded fine. See [Extension tools must be named explicitly](#extension-tools-must-be-named-explicitly) above. Extensions that only shape output or add flags (no tool registration) need no `tools` change.

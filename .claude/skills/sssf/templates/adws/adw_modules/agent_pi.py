@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from functools import lru_cache
@@ -31,6 +32,25 @@ LABEL_CHARS = 80                # "bash: <command>" shown as the event name
 PRIMARY_ARGS = ("command", "path", "file_path", "pattern", "query", "url")
 
 
+def _pi_command() -> list[str]:
+    """The argv prefix that launches pi.
+
+    On Windows pi installs as `pi.cmd` / `pi.ps1` shims around a Node launcher.
+    CreateProcess cannot run a `.ps1` at all, and a `.cmd` routes every argument
+    through cmd.exe, which cuts a multi-line `--system-prompt` at its first
+    newline and expands `%`. Going straight to `node pi-launcher.js` keeps argv
+    intact and still lets the launcher pick the managed pi version.
+    """
+    if PI_PATH.endswith(".js"):
+        return [shutil.which("node") or "node", PI_PATH]
+    resolved = shutil.which(PI_PATH)
+    if resolved and Path(resolved).suffix.lower() in (".cmd", ".bat", ".ps1"):
+        launcher = Path(resolved).with_name("pi-launcher.js")
+        if launcher.is_file():
+            return [shutil.which("node") or "node", str(launcher)]
+    return [resolved or PI_PATH]
+
+
 def _count(value: str) -> int:
     """Parse pi's compact model-list counts (`272K`, `1.0M`)."""
     suffixes = {"K": 1_000, "M": 1_000_000}
@@ -45,7 +65,8 @@ def _pi_catalog() -> list[tuple[str, str, int]]:
     """Read pi's merged catalog, including built-in providers and custom models."""
     try:
         result = subprocess.run(
-            [PI_PATH, "--list-models"], capture_output=True, text=True,
+            [*_pi_command(), "--list-models"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=30, env=operator_env(), check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -107,7 +128,10 @@ def _context_tokens(usage: dict) -> int:
 
 def context_window(provider: str, model_id: str) -> int:
     """The model's context ceiling from pi's merged model catalog."""
-    registry = json.loads(Path(MODELS_JSON).read_text())
+    # models.json only exists once a custom model is registered; logins alone
+    # (built-in providers) never create it, and the catalog below covers them.
+    path = Path(MODELS_JSON)
+    registry = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     for model in registry.get("providers", {}).get(provider, {}).get("models", []):
         if model.get("id") == model_id:
             return int(model.get("contextWindow") or 0)
@@ -136,6 +160,39 @@ def _label(tool: str, args: dict) -> str:
         value = next((v for v in args.values() if isinstance(v, str) and v.strip()), "")
     value = " ".join(str(value).split())
     return f"{tool}: {_clip(value, LABEL_CHARS)}" if value else tool
+
+
+def _provider_error(raw: str) -> str:
+    """One readable line out of pi's `errorMessage`.
+
+    Providers nest their error JSON inside strings, sometimes behind a prefix:
+    `{"error": {"message": "429 Too Many Requests {\"error\": {...}}"}}`. Peel
+    until the innermost `{code, status, message}` and report that.
+    """
+    def parsed(text: str):
+        start = text.find("{")
+        if start == -1:
+            return None
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            return None
+
+    error = parsed(raw) or {}
+    for _ in range(5):                       # however many layers there are
+        if isinstance(error.get("error"), dict):
+            error = error["error"]
+            continue
+        message = error.get("message")
+        if not isinstance(message, str):
+            break
+        inner = parsed(message)
+        if isinstance(inner, dict):
+            error = inner
+            continue
+        code = " ".join(str(error[k]) for k in ("code", "status") if error.get(k))
+        return _clip(" ".join(f"{code} {message}".split()), 600)
+    return _clip(" ".join(raw.split()), 600)
 
 
 class ToolCallTracker:
@@ -216,7 +273,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     """
     provider, model_id = resolve_model(request.model)
     cmd = [
-        PI_PATH, "-p", "--mode", "json",
+        *_pi_command(), "-p", "--mode", "json",
         "--provider", provider, "--model", model_id,
         "--thinking", request.thinking,
         "--session-id", request.session_id,
@@ -242,11 +299,14 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     # a run that sat idle at 0% CPU with an empty raw_output.jsonl.
     process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, bufsize=1, cwd=request.cwd,
+                               # pi writes UTF-8; Windows would decode as cp1252
+                               text=True, encoding="utf-8", errors="replace",
+                               bufsize=1, cwd=request.cwd,
                                env=operator_env())
     if on_spawn:
         on_spawn(process.pid)
-    with raw_path.open("a") as raw:
+    last_error = ""                          # set while the latest assistant turn is an error
+    with raw_path.open("a", encoding="utf-8") as raw:
         assert process.stdout is not None
         for line in process.stdout:
             raw.write(line)
@@ -261,6 +321,8 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
             if event.get("type") == "message_end":
                 message = event.get("message", {})
                 if message.get("role") == "assistant":
+                    last_error = (message.get("errorMessage") or "provider error"
+                                  if message.get("stopReason") == "error" else "")
                     text = _text_of(message)
                     if text:
                         result.text = text   # last assistant message wins
@@ -281,6 +343,12 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     result.returncode = process.wait()
     if on_exit:
         on_exit(process.pid)
+    # A run whose LAST turn is a provider error never finished: whatever text an
+    # earlier turn left is not its answer. Say what the provider said, instead of
+    # handing an empty reply to the JSON parser to "correct" — a model that is
+    # out of quota cannot fix its formatting. pi has already done its own retries.
+    if last_error:
+        raise RuntimeError(f"{provider}/{model_id} failed: {_provider_error(last_error)}")
     if result.returncode != 0 and not result.text:
         raise RuntimeError(f"pi exited {result.returncode}: {stderr.strip()[-800:]}")
     return result

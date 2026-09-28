@@ -368,16 +368,17 @@ class EventRecord(BaseModel):
     ended_at: Optional[str] = None
 
 
-# ── Pi coding agent interface ────────────────────────────────────────────────
+# ── Coding agent interface ───────────────────────────────────────────────────
+# Named for pi, which came first; agent_cc takes and returns the same two types.
 
 class PiRequest(BaseModel):
-    """Everything one non-interactive pi run needs."""
+    """Everything one non-interactive coding-agent run needs (pi or claude_code)."""
 
     prompt: str
     system_prompt: str
     model: str                      # registry pattern, resolved to provider + id
     thinking: str = "medium"
-    session_id: str                 # pi --session-id: creates or continues
+    session_id: str                 # the SSSF session id; same id = same context window
     session_dir: str
     raw_output_path: str            # JSONL stream lands here
     tools: Optional[list[str]] = None

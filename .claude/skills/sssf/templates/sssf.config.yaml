@@ -1,5 +1,6 @@
 # sssf.config.yaml — the factory's agent roster. One agent, one prompt, one purpose.
-# v1 runs the Pi coding agent only; coding_agent: claude_code arrives in v2.
+# coding_agent: pi (default) or claude_code — per agent. claude_code needs a Claude
+# model (fable | opus | sonnet | haiku | claude-*); see references/config.md.
 defaults:
   coding_agent: pi
   model: google/gemini-3.6-flash   # provider/id — a bare pattern is ambiguous across providers

@@ -94,7 +94,9 @@ async function serveStatic(req: Request): Promise<Response> {
 
   // Reject traversal before touching the filesystem.
   const candidate = resolve(join(DIST_DIR, pathname));
-  if (candidate === DIST_DIR || candidate.startsWith(DIST_DIR + "/")) {
+  // `sep`, not "/": on Windows resolve() yields C:\...\dist\assets\x.js, and a
+  // hardcoded "/" sent every asset to the SPA fallback as text/html.
+  if (candidate === DIST_DIR || candidate.startsWith(DIST_DIR + sep)) {
     if (existsSync(candidate) && statSync(candidate).isFile()) {
       return new Response(Bun.file(candidate));
     }

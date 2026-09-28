@@ -8,6 +8,8 @@ so a CI log reads exactly like a terminal.
 
 from __future__ import annotations
 
+import sys
+
 from rich.console import Console as RichConsole
 from rich.markup import escape
 from rich.panel import Panel
@@ -34,6 +36,10 @@ class Console:
         self.phase_name = ""
         self.results: list[str] = []            # phase statuses, for the summary
         self._finished = False                  # the summary panel prints once
+        # Windows consoles default to cp1252, which cannot encode ▶ ✓ └ — the
+        # first phase line would crash the run. UTF-8 out, whatever the locale.
+        if hasattr(sys.stdout, "reconfigure") and (sys.stdout.encoding or "").lower() != "utf-8":
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         self._out = RichConsole(highlight=False, soft_wrap=True)
 
     # ── the one helper: print AND trace, always together ────────────────────

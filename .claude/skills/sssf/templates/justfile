@@ -8,6 +8,13 @@
 set dotenv-load
 set positional-arguments
 
+# Windows: run recipes with Git's own sh, wherever Git is installed. A setting
+# cannot compute a path, but a git shell alias (`!sh`) always runs Git's bundled
+# sh, so `git` on PATH is the only requirement — no Git Bash, no sh on PATH.
+# Git runs shell aliases from the repo's top level; this justfile lives there.
+# macOS and Linux ignore this line and use their own sh.
+set windows-shell := ["git", "-c", "alias.sssf-sh=!sh", "sssf-sh", "-cu"]
+
 # Every recipe passes this through, so `SSSF_CONFIG=other.yaml just sdlc "..."`
 # swaps the whole roster for one run.
 config := env_var_or_default("SSSF_CONFIG", "adws/adw_sssf_config/sssf.config.yaml")
@@ -29,9 +36,9 @@ default:
 demo:
     @echo "1/2  adw_prompt: one agent, one prompt"
     uv run adws/adw_prompt.py --config {{config}} --agent scout "reply with a one-line summary of this repo"
-    @echo "\n2/2  adw_scout: read-only recon"
+    @printf '\n2/2  adw_scout: read-only recon\n'
     uv run adws/adw_scout.py --config {{config}} "list the top-level directories in this repo and what each is for. change nothing."
-    @echo "\nboth done. now run:  just sessions    (or: just obs)"
+    @printf '\nboth done. now run:  just sessions    (or: just obs)\n'
 
 # ── run a workflow ──────────────────────────────────────────────────────────
 # Args pass straight through: "<prompt or path/to/prompt.md>" [--adw-id X]
@@ -81,9 +88,12 @@ procs ADW_ID:
 
 # ── observability UI ────────────────────────────────────────────────────────
 
-# Needs bun. The db path is passed explicitly because the server runs from the
-# app dir and would otherwise look for a trace db sitting next to itself.
+# Needs bun. ONE foreground process: the UI is built into dist/ and the API
+# server serves it, so Ctrl+C stops everything — nothing is left holding a port.
+# The db path is passed explicitly because the server runs from the app dir and
+# would otherwise look for a trace db sitting next to itself. It is
+# single-quoted because on Windows it is a C:\... path, and sh eats unquoted \.
 
-# boot the trace UI, http://localhost:4601 (api on :4600)
+# boot the trace UI, http://localhost:4600 (Ctrl+C stops it)
 obs:
-    cd .claude/skills/sssf/apps/visualizer && bun install && (SSSF_DB={{justfile_directory()}}/{{db}} bun run server/index.ts &) && bunx vite
+    cd .claude/skills/sssf/apps/visualizer && bun install && bunx vite build --logLevel warn && SSSF_DB='{{justfile_directory()}}/{{db}}' exec bun run server/index.ts
