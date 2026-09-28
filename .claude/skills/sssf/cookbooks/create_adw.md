@@ -67,9 +67,11 @@ from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutp
 REQUIRED_AGENTS = ["planner", "builder"]        # names, never models
 
 
-def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None) -> int:
+def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None,
+         allow_dirty: bool = False) -> int:
     cfg = agents.load_config(config)            # 1. point to config
     agents.validate(cfg, REQUIRED_AGENTS)       # 2. fail fast — nothing spawns on a half-valid config
+    git_helper.require_committable(allow_dirty) #    this chain ends in a commit: clean tree or --allow-dirty
     run = session.ensure(cfg, adw_id)           # 3. pin-or-create the session → the Run object
 
     with run.phase(PhaseParams(name="request", kind="engineer", owner=run.engineer,
@@ -99,13 +101,16 @@ if __name__ == "__main__":
     parser.add_argument("prompt", help="inline text or a path to a prompt file")
     parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
     parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="start even with uncommitted changes; they land in this run's commit")
     args = parser.parse_args()
-    sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id))
+    sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id, args.allow_dirty))
 ```
 
 ## Non-negotiables
 
-- **`REQUIRED_AGENTS` + `agents.validate()`** — declare every agent name the script uses and validate before the first phase.
+- **`REQUIRED_AGENTS` + `agents.validate()`** — declare every agent name the script uses and validate before the first phase. An ADW with a quality phase also declares `REQUIRED_QUALITY = ["test"]` and passes it: `agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_QUALITY)`.
+- **An ADW that ends in a commit calls `git_helper.require_committable(allow_dirty)` right after validating**, and takes an `--allow-dirty` flag. `commit_all` stages with `git add -A`, so without the preflight the engineer's own uncommitted work lands in the agents' commit.
 - **Every agent call declares a concrete output type** from `data_types.py`. No untyped handoffs.
 - **`previous=` carries the chain** — the upstream envelope lands in the next agent's `user.md` as `{{previous_envelope}}`; bulky context moves through `context_handoff/` files the envelope references.
 - **The engineer request phase comes first**, always.

@@ -49,6 +49,7 @@ class Run:
         self.phases: list[Phase] = []
         self.tokens = 0
         self.cost = 0.0
+        self.finalized = False       # the session row has its final status
         self._seq = tracer.max_phase_seq(adw_id)   # a joined run continues the sequence
         self.repo_root = git_helper.repo_root()    # where every agent is spawned to work
         self.session_dir = ensure_dir(Path(cfg.defaults.data_dir) / "sessions" / adw_id)
@@ -81,9 +82,11 @@ class Run:
                                       type="phase_start", name=params.name,
                                       payload={"kind": params.kind, "owner": params.owner,
                                                "description": params.description}))
-        self.console.phase_started(phase)
         clock = time.monotonic()
         try:
+            # Inside the try: if even the start line fails (a console that cannot
+            # encode it, say), the phase and the session still close as failed.
+            self.console.phase_started(phase)
             yield PhaseHandle(self, phase)
         except BaseException as error:
             phase.status = "fail"                      # success must be earned
@@ -97,6 +100,7 @@ class Run:
                                           payload={"status": "fail"}))
             self.tracer.phase_upsert(phase)
             self.tracer.session_finish(self.adw_id, ok=False)
+            self.finalized = True
             self.console.phase_ended(phase, time.monotonic() - clock)
             self.console.session_finished(False, self.tokens, self.cost,
                                           self.cfg.observability.db)
@@ -138,5 +142,6 @@ class Run:
                 type="error", name="not_accepted", payload={"reason": note}))
             self.console.note(f"not accepted: {note}")
         self.tracer.session_finish(self.adw_id, ok=ok)
+        self.finalized = True
         self.console.session_finished(ok, self.tokens, self.cost, self.cfg.observability.db)
         return 0 if ok else 1

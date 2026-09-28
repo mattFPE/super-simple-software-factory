@@ -10,12 +10,13 @@ disposes.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from . import agent_cc, agent_pi, permissions, prompts
+from . import agent_cc, agent_pi, permissions, prompts, quality as quality_blocks
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
                          GateCheck, GateReport, Phase, PiRequest, PiResult, SSSFConfig,
                          UsageBreakdown)
@@ -38,11 +39,35 @@ def load_config(path: str = "adws/adw_sssf_config/sssf.config.yaml") -> SSSFConf
     raw = yaml.safe_load(Path(path).read_text()) or {}
     defaults = raw.get("defaults", {}) or {}
     for agent in raw.get("agents", []) or []:
-        for key in ("coding_agent", "model", "thinking", "color", "tools", "writes"):
+        for key in ("coding_agent", "model", "thinking", "color", "tools", "writes",
+                    "idle_timeout_seconds"):
             if key in defaults:
                 agent.setdefault(key, defaults[key])
         agent.setdefault("harness_engineering", defaults.get("harness_engineering", []))
-    return SSSFConfig(**raw)
+    cfg = SSSFConfig(**raw)
+    for agent in cfg.agents:
+        _settle_model(agent)
+    return cfg
+
+
+def _settle_model(agent: AgentConfig) -> None:
+    """Collapse `model:` candidates to the first one that resolves here.
+
+    Which provider name a model sits under depends on the machine — a ChatGPT
+    login registers `openai-codex/…`, an API key `openai/…` — so a committed
+    roster may list both. None resolving leaves the first, for validate() to
+    report along with every candidate it tried.
+    """
+    candidates = [agent.model] if isinstance(agent.model, str) else list(agent.model)
+    agent.model_candidates = candidates
+    for candidate in candidates:
+        try:
+            _interface(agent).resolve_model(candidate)
+        except ValueError:
+            continue
+        agent.model = candidate
+        return
+    agent.model = candidates[0]
 
 
 def resolve(cfg: SSSFConfig, name: str) -> AgentConfig:
@@ -53,9 +78,10 @@ def resolve(cfg: SSSFConfig, name: str) -> AgentConfig:
                      f"available: {[a.name for a in cfg.agents]}")
 
 
-def validate(cfg: SSSFConfig, required: list[str]) -> None:
-    """Fail fast: every required name must resolve to a usable agent."""
-    problems = []
+def validate(cfg: SSSFConfig, required: list[str], quality: list[str] = ()) -> None:
+    """Fail fast: every required agent must be usable, and every quality block
+    the ADW runs (`REQUIRED_QUALITY`) must have a command that resolves."""
+    problems = quality_blocks.preflight(cfg, list(quality))
     for name in required:
         try:
             agent = resolve(cfg, name)
@@ -69,7 +95,10 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
         try:
             _interface(agent).resolve_model(agent.model)
         except ValueError as e:
-            problems.append(f"agent {name!r}: {e}")
+            tried = agent.model_candidates
+            problems.append(f"agent {name!r}: " + (
+                f"none of its {len(tried)} model candidates resolve here: {', '.join(tried)}"
+                if len(tried) > 1 else str(e)))
         if agent.coding_agent == "claude_code":
             problems += [f"agent {name!r}: {p}"
                          for p in agent_cc.preflight(agent.harness_engineering)]
@@ -94,6 +123,12 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     user_text = prompts.render(agent.prompt_engineering.user, variables)
     prompts.save(agent_dir / "prompts", "system.md", system_text)
     prompts.save(agent_dir / "prompts", "user.md", user_text)
+    drift = contract_drift(user_text, call.output_type)
+    if drift:   # before the first send: a drifted contract costs no tokens to find
+        raise RuntimeError(
+            f"output contract drift for {agent.name} ({call.output_type.__name__}) — the "
+            "user.md ## Report example and the type disagree (SKILL.md rule 2):\n- "
+            + "\n- ".join(drift))
 
     session_id = _agent_session_id(run, agent)
     run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,
@@ -127,6 +162,7 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
             tools=agent.tools,
             extensions=agent.harness_engineering,
             cwd=str(run.repo_root),
+            idle_timeout_seconds=agent.idle_timeout_seconds,
         )
         result = _interface(agent).run(
             request,
@@ -218,6 +254,40 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     if envelope.status != "success":
         raise RuntimeError(f"{agent.name} reported status={envelope.status!r}: {envelope.summary}")
     return envelope
+
+
+def contract_drift(user_text: str, output_type: type[EnvelopeBase]) -> list[str]:
+    """Where a prompt's `## Report` example and its output type disagree.
+
+    Every field has a default, so drift never fails parsing — it fails SILENTLY:
+    a key the type lacks is dropped, a field the prompt never asks for arrives
+    as its default, and a gate then checks an empty list. So compare the keys,
+    both ways, whenever the Report says it produces THIS type ("matching
+    `Type`"). The four EnvelopeBase fields are shared and may be omitted. A
+    Report naming another type (adw_prompt reuses an agent for GenericOutput)
+    or none at all is not this call's contract, and is not checked.
+    """
+    heading = user_text.find("## Report")
+    if heading == -1:
+        return []
+    report = user_text[heading:]
+    named = re.search(r"matching `(\w+)`", report)
+    if not named or named.group(1) != output_type.__name__:
+        return []
+    block = re.search(r"```json\s*(\{.*?\})\s*```", report, re.S)
+    if not block:
+        return [f"the Report section names {output_type.__name__} but shows no ```json example"]
+    try:
+        example = set(json.loads(block.group(1)))
+    except json.JSONDecodeError as error:
+        return [f"the Report JSON example is not valid JSON ({error})"]
+    fields = set(output_type.model_fields)
+    own = fields - set(EnvelopeBase.model_fields)
+    problems = [f"example key {key!r} is not a {output_type.__name__} field — the agent's "
+                "value would be silently dropped" for key in sorted(example - fields)]
+    problems += [f"{output_type.__name__}.{key} is never asked for in the example — it would "
+                 "always arrive as its default" for key in sorted(own - example)]
+    return problems
 
 
 # ── internals ────────────────────────────────────────────────────────────────

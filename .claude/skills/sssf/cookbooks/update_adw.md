@@ -77,7 +77,7 @@ runner did its job — so phases alone would report a green run that never passe
 its tests, in the db and the UI as well as the terminal. Pass `accepted=` and
 the exit code, the session status, and the banner are decided together.
 
-`quality.as_envelope` is the adapter: a deterministic result shaped as an envelope, so the builder cannot tell it came from code. Wire the real command in `quality.py` first — the stamped blocks are `echo` placeholders that announce themselves.
+`quality.as_envelope` is the adapter: a deterministic result shaped as an envelope, so the builder cannot tell it came from code. Set the real command under `quality:` in `sssf.config.yaml` first, and declare it in the ADW's `REQUIRED_QUALITY` so `agents.validate()` refuses to start without it.
 
 Three distinctions worth keeping straight:
 

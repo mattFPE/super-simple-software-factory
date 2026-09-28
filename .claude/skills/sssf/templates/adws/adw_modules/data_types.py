@@ -131,7 +131,7 @@ class DocumentOutput(EnvelopeBase):
 # ── Deterministic quality blocks ─────────────────────────────────────────────
 
 QualityArea = Literal["frontend", "backend"]
-QualityOperation = Literal["lint", "typecheck", "build"]
+QualityOperation = Literal["test", "lint", "typecheck", "build"]
 
 
 class QualityCheckSpec(BaseModel):
@@ -304,7 +304,11 @@ class PromptEngineering(BaseModel):
 class AgentConfig(BaseModel):
     name: str
     coding_agent: Literal["pi", "claude_code"] = "pi"
-    model: str = "google/gemini-3.6-flash"
+    # One model, or candidates in preference order: the first that resolves on
+    # THIS machine wins (load_config settles it to one string). A roster that
+    # lists [openai-codex/x, openai/x] validates under a ChatGPT login and an API key.
+    model: str | list[str] = "google/gemini-3.6-flash"
+    model_candidates: list[str] = Field(default_factory=list)   # set by load_config
     thinking: str = "medium"        # off | minimal | low | medium | high | xhigh | max
     color: str = ""                 # hex swatch for this agent's lane in the UI
     purpose: str = ""
@@ -320,15 +324,19 @@ class AgentConfig(BaseModel):
     #   [...] -> only these. A trailing "/" means a directory prefix; a "*"
     #            makes it a glob; anything else is an exact path.
     writes: Optional[list[str]] = None
+    # Seconds with no output from the agent before its process tree is killed
+    # and the phase fails. A hang otherwise never fails — it just goes quiet.
+    idle_timeout_seconds: int = 600
 
 
 class ConfigDefaults(BaseModel):
     coding_agent: Literal["pi", "claude_code"] = "pi"
-    model: str = "google/gemini-3.6-flash"
+    model: str | list[str] = "google/gemini-3.6-flash"   # one, or candidates in order
     thinking: str = "medium"
     color: str = ""
     harness_engineering: list[str] = Field(default_factory=list)
     tools: Optional[list[str]] = None    # roster-wide allowlist; None = all tools usable
+    idle_timeout_seconds: int = 600      # per-agent overridable; 0 = never kill
     # Off-limits to every agent that has not named them in its own `writes`.
     # The factory's own code is the default: an agent must not be able to edit
     # the machinery that decides whether its work passed.
@@ -336,6 +344,21 @@ class ConfigDefaults(BaseModel):
         "adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py",
     ])
     data_dir: str = "adws/adw_data"
+
+
+class QualityConfig(BaseModel):
+    """The project's known commands, as argv lists (SKILL.md rule 8).
+
+    Unset means not configured, and an unconfigured command never runs and
+    never passes: an ADW that needs one fails `validate()` before anything
+    spawns. The old default — a placeholder `echo` that exited 0 — reported a
+    green test phase for a suite that never ran.
+    """
+    test: Optional[list[str]] = None
+    lint: Optional[list[str]] = None
+    typecheck: Optional[list[str]] = None
+    build: Optional[list[str]] = None
+    timeout_seconds: int = 600
 
 
 class ObservabilityConfig(BaseModel):
@@ -346,6 +369,7 @@ class ObservabilityConfig(BaseModel):
 class SSSFConfig(BaseModel):
     defaults: ConfigDefaults = Field(default_factory=ConfigDefaults)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    quality: QualityConfig = Field(default_factory=QualityConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
 
 
@@ -384,6 +408,7 @@ class PiRequest(BaseModel):
     tools: Optional[list[str]] = None
     extensions: list[str] = Field(default_factory=list)
     cwd: str = "."                  # set from run.repo_root — the codebase root agents work in
+    idle_timeout_seconds: int = 600  # no output for this long -> tree killed, call fails
 
 
 class UsageBreakdown(BaseModel):

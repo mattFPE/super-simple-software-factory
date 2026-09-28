@@ -23,6 +23,7 @@ Run from the **target repo root** — the cwd is where everything lands. If the 
 | `adws/adw_data/prompt_engineering/{planner,builder,scout,reviewer,documenter}/` | `templates/prompt_engineering/` | yes — **the user-owned home for prompts** |
 | `adws/adw_data/harness_engineering/` | `templates/harness_engineering/` | yes — **the user-owned home for pi extensions** |
 | `justfile` | `templates/justfile` | yes — starter recipes: `just demo`, the workflows, the trace reads, `just obs` |
+| `adws/.sssf_stamp.json` | written by `install.py` | yes — a hash of every stamped file, so `--force` can tell your edits from its own files |
 | `adws/adw_data/sessions/`, `adws/adw_data/sssf.db` | created at runtime | no — gitignored |
 
 The two `*_engineering` dirs mirror the two config keys of the same name: `prompt_engineering` is what an agent is told, `harness_engineering` is what its harness can do. Both are yours the moment they are stamped. Edit them in `adws/adw_data/`, never back inside the skill.
@@ -31,7 +32,9 @@ The two `*_engineering` dirs mirror the two config keys of the same name: `promp
 
 ## Idempotency
 
-Re-running is safe. `install.py` skips **every** file that already exists — your config, your prompts, and previously stamped code alike — and reports what it skipped, so a second run doubles as a drift check. To refresh stamped code (`adw_modules/`, the starter `adw_*.py`) to the skill's current version, run with `--force` — but know that `--force` overwrites ALL existing stamped files, including `sssf.config.yaml` and `prompt_engineering/`, so commit or back up user-owned edits first.
+Re-running is safe. `install.py` skips **every** file that already exists — your config, your prompts, and previously stamped code alike — and reports what it skipped, so a second run doubles as a drift check.
+
+To refresh to the skill's current version, run with `--force`. It replaces only files that are **still exactly what it stamped** (per `adws/.sssf_stamp.json`, line endings normalized). Any file you edited, whether config, prompts, an ADW or a module, is kept and listed for you to merge by hand against `templates/`. A repo installed before the manifest existed has no record, so every file that differs from its template counts as edited. `--force-all` overwrites everything, your edits included. Commit before using it.
 
 ## Post-install checklist
 
@@ -39,8 +42,9 @@ Re-running is safe. `install.py` skips **every** file that already exists — yo
 2. **Pi is installed and on PATH** — `pi --version`. Set `PI_PATH` in `.env` if it is not.
 3. **The model resolves** — the config's default `gemini-3.6-flash` must be a registered id in `~/.pi/agent/models.json`. Check with `pi --list-models` or read the file directly; see `references/config.md` for model resolution.
 4. **Gitignore** — `install.py` appends `adws/adw_data/sessions/`, `adws/adw_data/sssf.db*`, and `.env` for you; confirm they landed. All three are runtime or secrets and must never be committed.
-5. **Git repo** — ADWs that end in a commit phase call `git_helper.commit_all`, which raises if the cwd is not a git repository. Run `git init` and make a first commit before using `adw_plan_build.py`, `adw_plan_build_test.py`, or `adw_simple_sdlc.py`. `adw_document.py` needs one too: it measures the change with `git diff` against a base ref (`main` by default, `--base` to override).
-6. **Smoke test** — `just demo` runs two cheap read-only workflows back to back, or run the smallest ADW directly:
+5. **Git repo** — ADWs that end in a commit phase check at startup that the cwd is a git repository with a clean working tree (`git_helper.require_committable`), because the commit stages with `git add -A`. Pass `--allow-dirty` to include existing changes on purpose. Run `git init` and make a first commit before using `adw_plan_build.py`, `adw_plan_build_test.py`, or `adw_simple_sdlc.py`. `adw_document.py` needs one too: it measures the change with `git diff` against a base ref (`main` by default, `--base` to override).
+6. **Quality commands** — set `quality.test` in `sssf.config.yaml` to your real test argv. ADWs with a test phase refuse to start without it.
+7. **Smoke test** — `just demo` runs two cheap read-only workflows back to back, or run the smallest ADW directly:
 
 ```bash
 just demo                                                    # both, end to end

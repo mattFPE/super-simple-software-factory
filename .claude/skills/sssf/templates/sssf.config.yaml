@@ -37,6 +37,17 @@ observability:
   db: adws/adw_data/sssf.db        # tracer writes here directly; the UI polls it
   poll_ms: 500                     # visualizer live-poll cadence
 
+# The project's known commands, as argv lists (SKILL.md rule 8). An unset
+# command is "not configured" and never passes: every ADW with a test phase
+# refuses to start until `test` is set. Binaries by bare name — they resolve
+# on your own PATH, `npm` -> npm.cmd on Windows included.
+quality:
+  test:                            # e.g. [uv, run, pytest, -q]   or  [bun, test]
+  lint:                            # e.g. [uv, run, ruff, check, .]
+  typecheck:                       # e.g. [bun, x, tsc, --noEmit]
+  build:                           # e.g. [bun, run, build]
+  timeout_seconds: 600             # per command
+
 agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3

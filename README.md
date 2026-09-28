@@ -80,7 +80,7 @@ just obs                   # the trace UI in the background, needs bun (just obs
 uv run adws/adw_prompt.py "reply with a one-line summary of this repo" --agent scout
 ```
 
-Re-running `install.py` is safe. It skips every file that already exists and reports what it skipped, so a second run doubles as a drift check. `--force` refreshes stamped code to the skill's current version, but it overwrites **all** stamped files including your `sssf.config.yaml` and your prompts, so commit first.
+Re-running `install.py` is safe. It skips every file that already exists and reports what it skipped, so a second run doubles as a drift check. `--force` refreshes stamped files to the skill's current version, but only the ones you have not modified since they were stamped (hashes in `adws/.sssf_stamp.json`, which you commit). Files you edited are kept and listed. `--force-all` overwrites everything.
 
 Green on the smoke test means the whole path works: config validated, session minted, Pi ran, envelope parsed, events landed in `adws/adw_data/sssf.db`. Fix it there before composing anything larger, because every multi-agent chain rides this exact path.
 
@@ -353,15 +353,17 @@ Honest edges, because knowing them is cheaper than discovering them.
 
 | Failure | What actually happens | What to do |
 |---|---|---|
-| The test phase reports green on a fresh install | `quality.py` ships placeholder commands that exit 0. Three ADWs run them as their test phase | Wire your real commands into `quality.py` before trusting `adw_build_test`, `adw_plan_build_test`, or `adw_simple_sdlc`. This is the first thing to customize |
-| A bare model pattern | The same model sits under several providers, so `gemini-3.6-flash` matches three catalog entries and `agents.validate()` refuses to spawn | Always write `provider/model-id` |
-| `just` is not installed | The stamped `justfile` is a convenience wrapper, nothing depends on it | Every recipe is a one-line `uv run` or `sqlite3` command. Open the justfile and run the line yourself |
-| A coding agent hangs silently | No events, no tokens, an empty `raw_output.jsonl`. The trace goes quiet rather than red | Query `processes` for what is alive and kill it children-first. A killed run finalizes its own trace to `fail` |
-| The synced triad drifts | Type, `## Report` example, and `output_type=` disagree, so every call burns correction rounds | Grep the type name and fix all three in one edit |
+| No test command configured | `quality:` in `sssf.config.yaml` ships unset, and unset is never a pass. Every ADW with a test phase declares `REQUIRED_QUALITY` and refuses to start, before any agent spawns, until `quality.test` is set and its program is on PATH | Set `quality.test` (and optionally `lint`, `typecheck`, `build`) to your real argv. This is the first thing to customize |
+| Uncommitted work when a committing ADW starts | The commit phase stages with `git add -A`, so it would sweep your own edits into the agents' commit. ADWs that commit refuse a dirty tree, or a non-repo, before any agent spawns | Commit or stash first. `--allow-dirty` includes the changes on purpose |
+| A coding agent hangs | An idle watchdog kills the agent's whole process tree (`taskkill /T` on Windows, the process group elsewhere) after `idle_timeout_seconds` with no output, default 600, and the phase fails saying so. The tree is also killed whenever the ADW exits early | Raise `idle_timeout_seconds` (per agent, or in `defaults`; `0` disables) for an agent that legitimately works in silence, such as one running a long test suite |
+| A run dies without closing its trace | A hard kill (every kill on Windows), a crash or a reboot leaves the session reading `running`. The next run's startup sweeps any `running` session whose process is gone and closes it as `fail` with an `abandoned` event | Nothing. It is reported on the console when it happens |
+| Model names differ between machines | The same model is `openai-codex/…` under a ChatGPT login and `openai/…` under an API key, and a bare pattern like `gemini-3.6-flash` matches several providers, so `agents.validate()` refuses | Write `provider/model-id`, or a list of candidates in preference order: `model: [openai-codex/gpt-5.6-terra, openai/gpt-5.6-terra]`. The first that resolves on this machine wins |
+| The output contract drifts | Every envelope field has a default, so drift never fails parsing. It fails silently, with dropped keys and fields that always arrive empty. Before the first send, each call compares its `## Report` example against its `output_type`, both ways, and fails on disagreement at zero token cost | Fix the triad the error names: type, `## Report` example, `output_type=` |
 | Gates pass, output is bad | Gates check what a predicate can check, not plan quality or code taste | Run the `reviewer`, or read it yourself |
 | An agent edits something it should not | Detected and rolled back after the call, and the phase fails | Expected. Widen that agent's `writes` if the change was legitimate |
-| Commit phase has nothing to commit | `commit_all` raises if the cwd is not a git repo or nothing changed | `git init` with one commit first. A no-op build fails the phase rather than committing nothing |
-| `install.py --force` | Overwrites **all** stamped files, config and prompts included | Commit before you force |
+| A build changes nothing | `commit_all` raises when there is nothing to commit, so a no-op build fails the phase rather than committing nothing | Expected. Read the builder's envelope for why |
+| Refreshing stamped code | `install.py` records a hash of every file it writes in `adws/.sssf_stamp.json`. `--force` refreshes only files you have not modified since they were stamped, and lists the ones it kept | Merge kept files by hand against the skill's `templates/`, or `--force-all` to overwrite everything, your edits included |
+| `just` is not installed | The stamped `justfile` is a convenience wrapper, nothing depends on it. On Windows it needs only `git` on PATH, recipes run through Git's bundled `sh` | Every recipe is a one-line `uv run` or `sqlite3` command. Open the justfile and run the line yourself |
 
 Also missing on purpose, so you know what to add: this runs on your current branch. For real work you want a branch per run, a sandbox around the agent, and a merge step at the end.
 
@@ -379,7 +381,7 @@ Where to start, roughly in the order that pays off fastest:
 
 | Change | File | Why |
 |---|---|---|
-| Your real commands | `adws/adw_modules/quality.py` | The shipped blocks are placeholders that exit 0. Until you wire this, your test phase is theater |
+| Your real commands | `quality:` in `adws/adw_sssf_config/sssf.config.yaml` | Ships unset, and every ADW with a test phase refuses to start until `quality.test` is your real argv |
 | Your prompts | `adws/adw_data/prompt_engineering/{agent}/` | Where your standards live: what a good plan looks like, what a review has to catch |
 | Your roster | `adws/adw_sssf_config/sssf.config.yaml` | Models, thinking levels, tools, and what each agent is allowed to write |
 | Your chains | `adws/adw_*.py` | Copy the closest workflow and edit the phase list. They are 40 to 180 lines on purpose |

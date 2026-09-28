@@ -43,11 +43,12 @@ agents:
 | Field | Type | Meaning |
 |---|---|---|
 | `coding_agent` | `pi` \| `claude_code` | Which interface runs the agent: `agent_pi.py` or `agent_cc.py`. Mixable per agent. See [Claude Code agents](#claude-code-agents). |
-| `model` | string | Model id. For Pi, any id registered in `~/.pi/agent/models.json`. For Claude Code, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a `claude-*` id. Default `gemini-3.6-flash`. |
+| `model` | string \| list | Model id, or candidates in preference order (see [Model resolution](#model-resolution)). For Pi, any id in pi's catalog. For Claude Code, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a `claude-*` id. Default `gemini-3.6-flash`. |
 | `thinking` | enum | Reasoning effort — see below. Default `medium`. |
 | `color` | hex string | Lane color for every agent that does not set its own. Default empty — the visualizer falls back to its own palette. |
 | `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension files (`-e`). Claude Code: plugin directories (`--plugin-dir`); a `.ts` pi extension fails validation. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
+| `idle_timeout_seconds` | int | Seconds with no output from an agent before its whole process tree is killed and the phase fails. Default `600`; `0` never kills. Per-agent overridable. |
 | `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py` — an agent must not be able to edit the machinery that decides whether its work passed. |
 | `data_dir` | path | Runtime home. Sessions land at `{data_dir}/sessions/{adw_id}/{agent_name}/`. Default `adws/adw_data`. |
 
@@ -58,6 +59,21 @@ agents:
 | `db` | path | SQLite trace db. `tracer.py` writes it directly; the visualizer polls it. Default `adws/adw_data/sssf.db`. |
 | `poll_ms` | int | Visualizer live-poll cadence in ms. History uses the same queries, lazy-paged. Default `500`. |
 
+### `quality`
+
+The project's known commands (SKILL.md rule 8), each an argv list run by `adw_modules/quality.py` as a `kind="code"` phase. Binaries by bare name: they resolve on your own PATH, Windows `.cmd` shims such as `npm` included.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `test`, `lint`, `typecheck`, `build` | list[string] \| unset | The command. **Unset means not configured, and that is never a pass**: an ADW that runs a block declares it in `REQUIRED_QUALITY`, and `agents.validate()` refuses to start until it is set and its program is on PATH. `run_quality` runs the configured blocks and notes the rest as skipped. |
+| `timeout_seconds` | int | Per command. Default `600`. |
+
+```yaml
+quality:
+  test: [uv, run, pytest, -q]
+  lint: [uv, run, ruff, check, .]
+```
+
 ### `agents[]`
 
 | Field | Required | Meaning |
@@ -67,7 +83,7 @@ agents:
 | `prompt_engineering.system` | yes | Path to the system prompt — who the agent is, its single purpose, its output contract. |
 | `prompt_engineering.user` | yes | Path to the default user prompt — the task template with `{{prompt}}`, `{{previous_envelope}}`, `{{context_handoff_dir}}`. |
 | `color` | no | Hex swatch (`"#a78bfa"`) for this agent's lane in the visualizer. Travels config → `agent_sessions.color` → `/api/sessions/:adw_id`, and rides the `agent_start` event so a lane is colored while the agent is still running. Unset = the UI's fallback palette. |
-| `coding_agent`, `model`, `thinking`, `color`, `harness_engineering` | no | Override the corresponding `defaults` key. |
+| `coding_agent`, `model`, `thinking`, `color`, `harness_engineering`, `idle_timeout_seconds` | no | Override the corresponding `defaults` key. |
 | `tools` | no | Allowlist. **Omitting the key means all tools usable.** A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. Naming a `protected_files` path here is what unlocks it. **The session runtime under `data_dir` is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
 
@@ -108,6 +124,14 @@ agent 'scout': model pattern 'gemini-3.6-flash' is ambiguous:
 ```
 
 That is `agents.validate()` doing its job — it fails before anything spawns rather than silently billing the wrong provider — but it means every agent in the roster inheriting that default is grounded until the pattern is qualified. Qualifying is the whole fix: `google/gemini-3.6-flash`, `openai/gpt-5.6-terra`, `fireworks/accounts/fireworks/models/kimi-k3`. The leading segment is matched against the provider list first, so the rest of the string can contain slashes.
+
+**Or list candidates.** Which provider a model sits under depends on the machine: a ChatGPT login registers `openai-codex/gpt-5.6-terra`, an API key `openai/gpt-5.6-terra`. A roster committed from one would not validate on the other. `model` also takes a list in preference order, and `load_config` settles it to the first candidate that resolves here; everything downstream (trace, `agent_map.json`) sees one model:
+
+```yaml
+model: [openai-codex/gpt-5.6-terra, openai/gpt-5.6-terra]
+```
+
+If none resolves, validation lists every candidate it tried.
 
 Other consequences worth knowing:
 

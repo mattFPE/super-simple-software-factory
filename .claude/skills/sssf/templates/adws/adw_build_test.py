@@ -26,12 +26,13 @@ from adw_modules import agents, gates, quality, session, utils
 from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams
 
 REQUIRED_AGENTS = ["builder"]
+REQUIRED_QUALITY = ["test"]           # validate() refuses to start without it
 MAX_FIX_LOOPS = 3
 
 
 def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None) -> int:
     cfg = agents.load_config(config)
-    agents.validate(cfg, REQUIRED_AGENTS)
+    agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_QUALITY)
     run = session.ensure(cfg, adw_id)
 
     def record(ph, result) -> None:

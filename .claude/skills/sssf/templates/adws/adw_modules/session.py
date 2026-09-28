@@ -7,6 +7,7 @@ minted and printed so the next ADW can pick it up.
 
 from __future__ import annotations
 
+import atexit
 import os
 import signal
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 from .data_types import SSSFConfig
 from .runner import Run
 from .tracer import Tracer
-from .utils import engineer_name, new_id
+from .utils import engineer_name, new_id, pid_alive
 
 
 def _finalize_when_killed(run: Run) -> None:
@@ -34,11 +35,21 @@ def _finalize_when_killed(run: Run) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, handler)
 
+    def on_exit() -> None:
+        # Anything that ends the interpreter without run.finish() — an exception
+        # between phases, a bug in the ADW script — still closes the trace.
+        if not run.finalized:
+            run.tracer.session_finish(run.adw_id, ok=False)
+    atexit.register(on_exit)
+
 
 def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
     adw_id = adw_id or new_id(8)
     tracer = Tracer(cfg.observability.db,
                     f"{cfg.defaults.data_dir}/sessions/{adw_id}/events.jsonl")
+    # Runs that died without closing their trace (hard kill, crash, reboot)
+    # would read `running` forever; every new run sweeps them first.
+    abandoned = tracer.reap_abandoned(pid_alive)
     run = Run(cfg=cfg, adw_id=adw_id, tracer=tracer, engineer=engineer_name())
     tracer.session_start(adw_id, run.engineer, adw_name=Path(sys.argv[0]).stem)
     # This process is the run. Record it before any phase opens, so a run that
@@ -47,4 +58,7 @@ def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
                          " ".join([Path(sys.argv[0]).name, *sys.argv[1:]]))
     _finalize_when_killed(run)
     run.console.session_started(adw_id, run.engineer)
+    if abandoned:
+        run.console.note(f"closed {len(abandoned)} abandoned run(s) as failed: "
+                         + ", ".join(abandoned))
     return run

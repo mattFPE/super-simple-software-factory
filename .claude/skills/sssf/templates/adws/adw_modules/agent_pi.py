@@ -17,6 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import procs
 from .data_types import PiRequest, PiResult
 from .utils import now_iso, operator_env
 
@@ -302,13 +303,15 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                                # pi writes UTF-8; Windows would decode as cp1252
                                text=True, encoding="utf-8", errors="replace",
                                bufsize=1, cwd=request.cwd,
-                               env=operator_env())
+                               env=operator_env(), **procs.popen_kwargs())
     if on_spawn:
         on_spawn(process.pid)
     last_error = ""                          # set while the latest assistant turn is an error
-    with raw_path.open("a", encoding="utf-8") as raw:
+    with raw_path.open("a", encoding="utf-8") as raw,             procs.supervise(process, request.idle_timeout_seconds,
+                            f"pi {provider}/{model_id}") as watchdog:
         assert process.stdout is not None
         for line in process.stdout:
+            watchdog.touch()
             raw.write(line)
             raw.flush()                      # events land on disk as they happen
             line = line.strip()

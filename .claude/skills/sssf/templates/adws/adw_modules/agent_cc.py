@@ -38,6 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import procs
 from .agent_pi import _clip, _label, ARG_VALUE_CHARS, RESULT_SNIPPET_CHARS
 from .data_types import PiRequest, PiResult
 from .utils import now_iso, operator_env
@@ -276,7 +277,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=stderr_file, text=True, encoding="utf-8",
                                    errors="replace", bufsize=1, cwd=request.cwd,
-                                   env=_child_env())
+                                   env=_child_env(), **procs.popen_kwargs())
         if on_spawn:
             on_spawn(process.pid)
         assert process.stdin is not None and process.stdout is not None
@@ -285,8 +286,10 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
             process.stdin.close()
         except (BrokenPipeError, OSError):
             pass                             # it died early; stderr says why
-        with raw_path.open("a", encoding="utf-8") as raw:
+        with raw_path.open("a", encoding="utf-8") as raw,                 procs.supervise(process, request.idle_timeout_seconds,
+                                f"claude {model}") as watchdog:
             for line in process.stdout:
+                watchdog.touch()
                 raw.write(line)
                 raw.flush()                  # events land on disk as they happen
                 line = line.strip()

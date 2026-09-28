@@ -40,6 +40,31 @@ def repo_root() -> Path:
     return Path.cwd().resolve()
 
 
+def require_committable(allow_dirty: bool = False) -> None:
+    """Preflight for an ADW that ends in a commit. Call before any agent spawns.
+
+    `commit_all` stages with `git add -A`, so anything already uncommitted when
+    the run starts would be committed as the agents' work — the engineer's own
+    edits included. Refusing a dirty tree up front costs nothing; finding out
+    from the commit costs the whole run, or worse, succeeds. Checking for a repo
+    here also moves that failure from the last phase to before the first.
+    """
+    if not is_repo():
+        raise SystemExit(
+            "not a git repository — this ADW ends in a commit. Run `git init` and make "
+            "a first commit before running it.")
+    if allow_dirty:
+        return
+    dirty = _git("status", "--porcelain").splitlines()
+    if dirty:
+        listing = "\n".join(f"  {line}" for line in dirty[:20])
+        more = f"\n  … and {len(dirty) - 20} more" if len(dirty) > 20 else ""
+        raise SystemExit(
+            f"working tree has {len(dirty)} uncommitted change(s) that this ADW's commit "
+            f"would sweep in as the agents' work:\n{listing}{more}\n"
+            "Commit or stash them first, or pass --allow-dirty to include them on purpose.")
+
+
 def commit_all(message: str) -> str:
     """Stage the working tree and commit it. Returns the new short sha."""
     if not is_repo():

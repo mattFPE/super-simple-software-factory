@@ -5,32 +5,28 @@ down belongs here as code — it runs in milliseconds, costs nothing, and return
 the same answer every time. Agents are for the parts that need reading and
 deciding.
 
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  REPLACE THE PLACEHOLDER COMMANDS BELOW.                                     ║
-║                                                                              ║
-║  Every block ships as an `echo` that exits 0 and announces it is fake. They   ║
-║  are placeholders on purpose: a stamped repo has no way to guess your test    ║
-║  runner, and a wrong-but-plausible command that silently passes is worse      ║
-║  than one that says so out loud.                                             ║
-║                                                                              ║
-║  For each block you want: swap `_placeholder(...)` for the real argv, e.g.    ║
-║      argv=["bun", "test", "apps/web/server.test.ts"]                         ║
-║      argv=["uv", "run", "pytest", "-q"]                                      ║
-║      argv=["npm", "run", "lint"]                                             ║
-║  Delete the blocks you don't need, and drop them from run_quality()'s list.   ║
-║                                                                              ║
-║  Two rules when you write the real command:                                  ║
-║    1. argv LIST, never a shell string — no quoting bugs, no shell injection.  ║
-║    2. Call binaries by BARE NAME. These blocks inherit the operator's         ║
-║       environment (see utils.operator_env), so `bun`, `uv`, `pytest` resolve  ║
-║       exactly as they do in their terminal. Never hard-code an absolute path  ║
-║       like /Users/you/.bun/bin/bun — that bakes your machine into the trace.  ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+The commands themselves live in `sssf.config.yaml` under `quality:`, as argv
+lists — configuring a repo is a config edit, not a code edit:
+
+    quality:
+      test: [uv, run, pytest, -q]
+      lint: [uv, run, ruff, check, .]
+
+An unset command is NOT CONFIGURED, and that is never a pass: an ADW that needs
+one declares it in REQUIRED_QUALITY and fails `agents.validate()` before any
+agent spawns. (The factory used to ship `echo` placeholders that exited 0, so a
+fresh install reported a green test phase for a suite that never ran.)
+
+Two rules for the commands:
+  1. argv LIST, never a shell string — no quoting bugs, no shell injection.
+  2. Binaries by BARE NAME. They resolve on the operator's own PATH (see
+     utils.operator_env), including Windows `.cmd` shims such as `npm`.
 """
 
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -46,10 +42,33 @@ from .utils import now_iso, operator_env
 TAIL_CHARS = 4_000
 
 
-def _placeholder(name: str) -> list[str]:
-    """A command that does nothing and admits it. Replace every call to this."""
-    return ["echo", f"PLACEHOLDER {name}: edit adws/adw_modules/quality.py and "
-                    f"replace this echo with the real {name} command"]
+BLOCKS = ("test", "lint", "typecheck", "build")
+
+
+def configured(cfg) -> list[str]:
+    """The quality blocks this repo has a command for, in run order."""
+    return [name for name in BLOCKS if getattr(cfg.quality, name)]
+
+
+def resolve_argv(argv: list[str]) -> list[str]:
+    """Resolve argv[0] on the operator's PATH (PATHEXT too, so `npm` finds
+    `npm.cmd` on Windows, which CreateProcess alone would not)."""
+    found = shutil.which(argv[0], path=operator_env().get("PATH"))
+    return [found, *argv[1:]] if found else list(argv)
+
+
+def preflight(cfg, required: list[str]) -> list[str]:
+    """Problems that would stop a quality block before it runs."""
+    problems = []
+    for name in required:
+        argv = getattr(cfg.quality, name, None)
+        if not argv:
+            problems.append(
+                f"quality.{name} is not set in sssf.config.yaml — this ADW runs it. "
+                f"Add e.g. `quality: {{{name}: [uv, run, pytest, -q]}}`")
+        elif not shutil.which(argv[0], path=operator_env().get("PATH")):
+            problems.append(f"quality.{name}: {argv[0]!r} not found on PATH")
+    return problems
 
 
 def _check_dir(run, name: str) -> Path:
@@ -73,7 +92,7 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
     stderr = ""
     try:
         completed = subprocess.run(
-            spec.argv,
+            resolve_argv(spec.argv),
             cwd=run.repo_root,
             env=env,
             capture_output=True,
@@ -133,45 +152,32 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
 
 
 # ── Blocks ────────────────────────────────────────────────────────────────────
-# Replace every argv below. See the banner at the top of this file.
+# One per `quality:` key. The command comes from config; see the module docstring.
+
+def _block(run, name: str) -> QualityCheckResult:
+    argv = getattr(run.cfg.quality, name)
+    if not argv:
+        # validate() should have caught this; a direct caller gets the same answer.
+        raise RuntimeError(f"quality.{name} is not configured in sssf.config.yaml")
+    return _run(QualityCheckSpec(name=name, area="backend", operation=name, argv=argv,
+                                 timeout_seconds=run.cfg.quality.timeout_seconds), run)
+
 
 def test(run) -> QualityCheckResult:
-    """Run the project's test suite. The highest-value block to wire up first."""
-    return _run(QualityCheckSpec(
-        name="test",
-        area="backend",
-        operation="build",
-        argv=_placeholder("test"),        # e.g. ["bun", "test"] or ["uv", "run", "pytest", "-q"]
-        timeout_seconds=600,
-    ), run)
+    """Run the project's test suite. The highest-value block to configure first."""
+    return _block(run, "test")
 
 
 def lint(run) -> QualityCheckResult:
-    return _run(QualityCheckSpec(
-        name="lint",
-        area="backend",
-        operation="lint",
-        argv=_placeholder("lint"),        # e.g. ["bun", "x", "oxlint@1.36.0", "src"]
-    ), run)
+    return _block(run, "lint")
 
 
 def typecheck(run) -> QualityCheckResult:
-    return _run(QualityCheckSpec(
-        name="typecheck",
-        area="backend",
-        operation="typecheck",
-        argv=_placeholder("typecheck"),   # e.g. ["bun", "x", "tsc", "--noEmit"]
-    ), run)
+    return _block(run, "typecheck")
 
 
 def build(run) -> QualityCheckResult:
-    output_dir = _check_dir(run, "build") / "bundle"
-    return _run(QualityCheckSpec(
-        name="build",
-        area="backend",
-        operation="build",
-        argv=_placeholder("build"),       # e.g. ["bun", "build", "src/index.ts", "--outdir", str(output_dir)]
-    ), run)
+    return _block(run, "build")
 
 
 def run_tests(run) -> QualityResult:
@@ -218,13 +224,15 @@ def run_quality(run) -> QualityResult:
     The runner did its job; the CODE is what failed. Hand this result to the
     builder and let the bounded repair loop decide the run's fate.
     """
-    blocks: list[Callable] = [
-        test,
-        lint,
-        typecheck,
-        build,
-    ]
-    checks = [block(run) for block in blocks]
+    blocks: dict[str, Callable] = {"test": test, "lint": lint,
+                                   "typecheck": typecheck, "build": build}
+    names = configured(run.cfg)
+    for name in BLOCKS:
+        if name not in names:
+            run.console.note(f"quality {name}: not configured — skipped")
+    checks = [blocks[name](run) for name in names]
+    if not checks:
+        raise RuntimeError("no quality commands are configured in sssf.config.yaml")
     # A failure is the command, its exit code, and what it actually printed —
     # everything a builder needs to repair without opening a log or being told
     # what the error "means" by a parser that guessed.

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from .data_types import AgentConfig, EventRecord, GateReport, Phase
 from .utils import ensure_dir, new_id, now_iso
@@ -163,6 +165,39 @@ class Tracer:
             ("success" if ok else "fail", now_iso(), adw_id),
         )
         self.processes_end_all(adw_id)   # nothing of this run is alive any more
+
+    def reap_abandoned(self, is_alive: Callable[[int], bool], grace_seconds: int = 60) -> list[str]:
+        """Close out sessions still marked `running` whose run process is gone.
+
+        A run finalizes itself on the way out — except when it cannot: a hard
+        kill (on Windows every kill is hard), a crash in the interpreter, a
+        reboot. Those rows would read `running` forever. Any new run sweeps
+        them: no live `adw` process for the session means nothing is running
+        it. Sessions younger than `grace_seconds` are skipped, because a run
+        records its process a moment after its session row. Returns the
+        adw_ids it closed.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)).isoformat(
+            timespec="milliseconds")   # the same format now_iso() writes, so text order is time order
+        reaped = []
+        for (adw_id,) in self.conn.execute(
+                "SELECT adw_id FROM sessions WHERE status='running' AND started_at < ?",
+                (cutoff,)).fetchall():
+            pids = [pid for (pid,) in self.conn.execute(
+                "SELECT pid FROM processes WHERE adw_id=? AND kind='adw' AND ended_at IS NULL",
+                (adw_id,))]
+            if any(is_alive(pid) for pid in pids):
+                continue
+            now = now_iso()
+            self.conn.execute("UPDATE phases SET status='fail', ended_at=?, "
+                              "error=COALESCE(error, 'abandoned: the run process died') "
+                              "WHERE adw_id=? AND status='running'", (now, adw_id))
+            self.event(EventRecord(adw_id=adw_id, type="error", name="abandoned",
+                                   payload={"reason": "the run's process is no longer alive; "
+                                                      "closed by a later run's startup sweep"}))
+            self.session_finish(adw_id, ok=False)
+            reaped.append(adw_id)
+        return reaped
 
     def session_add_usage(self, adw_id: str, tokens: int, cost: float) -> None:
         self.conn.execute(

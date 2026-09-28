@@ -17,11 +17,12 @@ from adw_modules import agents, quality, session, utils
 from adw_modules.data_types import PhaseParams
 
 REQUIRED_AGENTS: list[str] = []
+REQUIRED_QUALITY = ["test"]           # validate() refuses to start without it
 
 
 def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw_id: str | None = None) -> int:
     cfg = agents.load_config(config)
-    agents.validate(cfg, REQUIRED_AGENTS)
+    agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_QUALITY)
     run = session.ensure(cfg, adw_id)
 
     with run.phase(PhaseParams(name="request", kind="engineer", owner=run.engineer,
