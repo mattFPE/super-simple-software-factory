@@ -21,6 +21,7 @@ undo your edits, not the agent's.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -138,6 +139,22 @@ def _setup(run, path: Path) -> None:
                                f"{output[-TAIL_CHARS:]}")
 
 
+def _origin_repo(repo: Path) -> str:
+    """`[HOST/]OWNER/REPO` of the remote the branch is pushed to.
+
+    Passed to gh as --repo, never left to gh's default: in a fork with an
+    `upstream` remote, gh's default repository is often the PARENT, so a bare
+    `gh pr create` would open the PR on someone else's project.
+    """
+    url = git_helper._git("remote", "get-url", "origin", repo=repo)
+    # https://host/o/r(.git) · ssh://git@host/o/r · git@host:o/r — scheme and user optional
+    match = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/]([^/]+)/([^/]+?)(?:\.git)?/?$", url)
+    if not match:
+        raise RuntimeError(f"cannot tell which repository `origin` is from {url!r}")
+    host, owner, name = match.groups()
+    return f"{owner}/{name}" if host == "github.com" else f"{host}/{owner}/{name}"
+
+
 def _land(run, mode: str) -> dict:
     wt = run.worktree
     main_root = run.main_root
@@ -160,8 +177,10 @@ def _land(run, mode: str) -> dict:
     elif mode == "pr":
         subject = git_helper._git("log", "-1", "--format=%s", repo=wt["path"])
         git_helper._git("push", "-u", "origin", wt["branch"], repo=wt["path"])
+        target = _origin_repo(wt["path"])
         done = subprocess.run(
-            ["gh", "pr", "create", "--base", wt["base_branch"], "--head", wt["branch"],
+            ["gh", "pr", "create", "--repo", target,
+             "--base", wt["base_branch"], "--head", wt["branch"],
              "--title", subject,
              "--body", f"Opened by SSSF run `{run.adw_id}` ({ahead} commit(s))."],
             cwd=wt["path"], capture_output=True, text=True, env=operator_env())
@@ -169,6 +188,7 @@ def _land(run, mode: str) -> dict:
             raise RuntimeError(f"gh pr create failed: {done.stderr.strip()[-TAIL_CHARS:]} "
                                f"(the branch {wt['branch']} is pushed)")
         outcome["pr"] = done.stdout.strip().splitlines()[-1] if done.stdout.strip() else ""
+        outcome["pr_repo"] = target
     else:
         outcome["merge_with"] = f"git merge {wt['branch']}"
     return outcome
