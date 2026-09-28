@@ -21,7 +21,6 @@ undo your edits, not the agent's.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -139,23 +138,23 @@ def _setup(run, path: Path) -> None:
                                f"{output[-TAIL_CHARS:]}")
 
 
-def _origin_repo(repo: Path) -> str:
-    """`[HOST/]OWNER/REPO` of the remote the branch is pushed to.
+def _pr_body(run, opts: RunOptions, ahead: int) -> str:
+    """What the PR says: the issue it closes, what the run checked, who opened it."""
+    parts = []
+    if opts.issue:
+        # Same repo by construction (issues.load refuses any other), so the bare
+        # form links, and GitHub closes the issue when the PR merges.
+        refs = f"Closes #{opts.issue.number}"
+        if opts.issue.parent:
+            refs += f"\nPart of #{opts.issue.parent.number}"
+        parts.append(refs)
+    parts += run.report.values()          # what the run checked: tests, review
+    parts.append(f"Opened by SSSF run `{run.adw_id}` ({ahead} commit(s)).")
+    return "\n\n".join(parts)
 
-    Passed to gh as --repo, never left to gh's default: in a fork with an
-    `upstream` remote, gh's default repository is often the PARENT, so a bare
-    `gh pr create` would open the PR on someone else's project.
-    """
-    url = git_helper._git("remote", "get-url", "origin", repo=repo)
-    # https://host/o/r(.git) · ssh://git@host/o/r · git@host:o/r — scheme and user optional
-    match = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/]([^/]+)/([^/]+?)(?:\.git)?/?$", url)
-    if not match:
-        raise RuntimeError(f"cannot tell which repository `origin` is from {url!r}")
-    host, owner, name = match.groups()
-    return f"{owner}/{name}" if host == "github.com" else f"{host}/{owner}/{name}"
 
-
-def _land(run, mode: str) -> dict:
+def _land(run, opts: RunOptions) -> dict:
+    mode = opts.land
     wt = run.worktree
     main_root = run.main_root
     head = git_helper.short_sha("HEAD", wt["path"])
@@ -175,15 +174,19 @@ def _land(run, mode: str) -> dict:
         git_helper._git("merge", "--no-edit", wt["branch"], repo=main_root)
         outcome["merged_into"] = wt["base_branch"]   # branch deleted once the worktree is gone
     elif mode == "pr":
-        subject = git_helper._git("log", "-1", "--format=%s", repo=wt["path"])
+        # An issue names the work better than the last commit does, which in a
+        # chain that commits per product is the write-up, not the change.
+        subject = (opts.issue.title if opts.issue
+                   else git_helper._git("log", "-1", "--format=%s", repo=wt["path"]))
         git_helper._git("push", "-u", "origin", wt["branch"], repo=wt["path"])
-        target = _origin_repo(wt["path"])
+        target = git_helper.origin_repo(wt["path"])
         done = subprocess.run(
             ["gh", "pr", "create", "--repo", target,
              "--base", wt["base_branch"], "--head", wt["branch"],
              "--title", subject,
-             "--body", f"Opened by SSSF run `{run.adw_id}` ({ahead} commit(s))."],
-            cwd=wt["path"], capture_output=True, text=True, env=operator_env())
+             "--body", _pr_body(run, opts, ahead)],
+            cwd=wt["path"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=operator_env())
         if done.returncode != 0:
             raise RuntimeError(f"gh pr create failed: {done.stderr.strip()[-TAIL_CHARS:]} "
                                f"(the branch {wt['branch']} is pushed)")
@@ -238,7 +241,8 @@ def land(run, opts: RunOptions) -> None:
             name="land", kind="code", owner="git",
             description=f"End the run as a {opts.land}: the work is on its branch, now "
                         "decide where it goes")) as ph:
-        outcome = _land(run, opts.land)
+        outcome = _land(run, opts)
+        run.landed = outcome              # the issue's closing comment links the PR
         _remove(run)
         if outcome.get("merged_into"):
             # Only now: git refuses to delete a branch a worktree has checked out.

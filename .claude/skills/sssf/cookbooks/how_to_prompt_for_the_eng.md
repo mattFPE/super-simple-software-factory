@@ -26,6 +26,12 @@ Your role is to simply kick off the workflow. There are entire teams of agents i
 
 Your job is to kick it off, monitor, observe, report. Not interact with the application layer. You operate only on the agentic layer, the ADWs, the software factory.
 
+## When the request is a GitHub issue
+
+"Run #42", "pick up the health-check ticket", or an issue URL: **pass the reference itself, `"#42"`, and write no prompt.** The issue already went through `/to-spec` or `/to-tickets` and was triaged. The ADW reads it, along with its parent spec, the maintainers' comments and its acceptance criteria, and renders the prompt itself (`adw_modules/issues.py`). If you retyped it, the checklist the review is gated on would drift from the one on the issue.
+
+Quote it (`"#42"`): unquoted, `#` starts a comment in sh and in PowerShell. If the engineer wants to add something to the ask, it goes on the issue as a comment, where the next run reads it too, not into your launch line. When the ADW refuses (not labelled ready, blocked, a spec already split into tickets), report the refusal verbatim. It names what to run instead.
+
 ## The shape
 
 Four lines. Nothing else earns its tokens.

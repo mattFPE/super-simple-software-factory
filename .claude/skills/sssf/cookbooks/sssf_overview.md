@@ -27,6 +27,7 @@ adws/
 │   ├── gates.py                 gate(envelope, run) -> GateReport — one check per item verified
 │   ├── changes.py               git diff vs a resolved base → ChangeSet → envelope for the documenter
 │   ├── worktree.py              a committing run's own worktree + branch sssf/<adw_id>; lands as branch/merge/PR
+│   ├── issues.py                a GitHub issue as the request: trust + readiness checks, claim, outcome comment
 │   ├── quality.py, procs.py     known commands from config · agent idle watchdog + process-tree kill
 │   ├── prompts.py, session.py, tracer.py, console.py, git_helper.py, utils.py
 └── adw_data/
@@ -66,7 +67,7 @@ uv run adws/adw_plan.py "add a /health endpoint"
 uv run adws/adw_plan_build.py requests/health.md --adw-id a1b2c3d4
 ```
 
-The prompt is inline text or a file path. `--adw-id` is optional on every ADW: given one, the run joins that session (same dirs, same `context_handoff/`, agents resume their existing context windows); omitted, a fresh id is minted and printed.
+The prompt is inline text, a file path, or a GitHub issue (`"#42"`, quoted, or its URL). An issue must be labelled ready-for-agent; a committing chain claims it and lands as a PR that closes it. `--adw-id` is optional on every ADW: given one, the run joins that session (same dirs, same `context_handoff/`, agents resume their existing context windows); omitted, a fresh id is minted and printed.
 
 ## When you have finished reading this
 

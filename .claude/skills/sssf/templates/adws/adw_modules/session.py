@@ -13,6 +13,7 @@ import signal
 import sys
 from pathlib import Path
 
+from . import issues
 from .data_types import RunOptions, SSSFConfig
 from .runner import Run
 from .tracer import Tracer
@@ -40,6 +41,7 @@ def _finalize_when_killed(run: Run) -> None:
         # between phases, a bug in the ADW script — still closes the trace.
         if not run.finalized:
             run.tracer.session_finish(run.adw_id, ok=False)
+            run.settle(ok=False)          # e.g. an issue's claim is still released
     atexit.register(on_exit)
 
 
@@ -78,23 +80,41 @@ def add_cli_args(parser, commits: bool = False) -> None:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="with --in-place: start anyway; your changes land in the commit")
     land = parser.add_mutually_exclusive_group()
+    land.add_argument("--branch", action="store_true",
+                      help="after the commit, leave the run's branch for you to take "
+                           "(the default, except for an issue, which defaults to --pr)")
     land.add_argument("--merge", action="store_true",
                       help="after the commit, merge the run's branch into the one you started from")
     land.add_argument("--pr", action="store_true",
                       help="after the commit, push the run's branch and open a PR with gh")
+    parser.add_argument("--force", action="store_true",
+                        help="an issue: run it even though it is labelled as running or an "
+                             "open PR already closes it (e.g. after a hard kill)")
 
 
 def cli_options(args) -> RunOptions:
+    commits = hasattr(args, "merge")
+    # The prompt was already resolved (utils.resolve_prompt), so this is a cache hit.
+    issue = issues.load(args.prompt) if issues.parse_ref(args.prompt) else None
+    if issue and commits:
+        issues.require_runnable(issue, force=args.force)
+    in_place = getattr(args, "in_place", False)
     opts = RunOptions(
-        config=args.config, adw_id=args.adw_id,
-        in_place=getattr(args, "in_place", False),
+        config=args.config, adw_id=args.adw_id, issue=issue,
+        in_place=in_place,
         allow_dirty=getattr(args, "allow_dirty", False),
         land=("merge" if getattr(args, "merge", False)
-              else "pr" if getattr(args, "pr", False) else "branch"))
+              else "pr" if getattr(args, "pr", False)
+              else "branch" if getattr(args, "branch", False)
+              # An issue ends where it can be closed: a PR. In place there is
+              # no branch of the run's own to open one from.
+              else "pr" if issue and commits and not in_place else "branch"))
     if opts.allow_dirty and not opts.in_place:
         raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "
                          "from your last commit and never sees your uncommitted changes")
     if opts.in_place and opts.land != "branch":
         raise SystemExit("--merge / --pr end a worktree run; with --in-place the commit is "
                          "already on your branch")
+    if getattr(args, "force", False) and not issue:
+        raise SystemExit("--force only applies when the prompt is an issue (#42 or its URL)")
     return opts

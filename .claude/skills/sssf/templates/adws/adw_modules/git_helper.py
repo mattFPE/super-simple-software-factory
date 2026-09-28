@@ -7,7 +7,9 @@ checkout otherwise. Omitted, git runs in the process cwd.
 
 from __future__ import annotations
 
+import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 Repo = Path | str | None
@@ -159,3 +161,73 @@ def diff_counts(base: str, repo: Repo = None) -> tuple[int, int]:
 
 def diff_text(base: str, repo: Repo = None) -> str:
     return _git("diff", base, repo=repo)
+
+
+# ── remotes ──────────────────────────────────────────────────────────────────
+
+def origin_repo(repo: Repo = None) -> str:
+    """`[HOST/]OWNER/REPO` of the remote a run's branch is pushed to.
+
+    Passed to gh as --repo, never left to gh's default: in a fork with an
+    `upstream` remote, gh's default repository is often the PARENT, so a bare
+    `gh pr create` would open the PR on someone else's project — and a bare
+    `gh issue view 42` would read someone else's issue.
+    """
+    url = _git("remote", "get-url", "origin", repo=repo)
+    # https://host/o/r(.git) · ssh://git@host/o/r · git@host:o/r — scheme and user optional
+    match = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/]([^/]+)/([^/]+?)(?:\.git)?/?$", url)
+    if not match:
+        raise RuntimeError(f"cannot tell which repository `origin` is from {url!r}")
+    host, owner, name = match.groups()
+    return f"{owner}/{name}" if host == "github.com" else f"{host}/{owner}/{name}"
+
+
+# ── the uncommitted change, as files ─────────────────────────────────────────
+
+def changed_paths(repo: Repo = None) -> list[str]:
+    """Every file the working tree changed since HEAD: modified, deleted, new.
+
+    Repo-relative, forward slashes, renames split into a delete and an add —
+    one path per file that would have to be put back to undo the change.
+    """
+    tracked = _git("diff", "--name-only", "--no-renames", "-z", "HEAD", repo=repo)
+    untracked = _git("ls-files", "--others", "--exclude-standard", "-z", repo=repo)
+    return sorted({p for p in (tracked + "\0" + untracked).split("\0") if p})
+
+
+def _head_blob(path: str, repo: Repo) -> bytes | None:
+    """The file as HEAD has it, byte for byte; None when HEAD has no such file."""
+    done = subprocess.run(["git", "show", f"HEAD:{path}"], capture_output=True, cwd=repo)
+    return done.stdout if done.returncode == 0 else None
+
+
+def _put(path: Path, content: bytes | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+@contextmanager
+def reverted(paths: list[str], repo: Path, backup_dir: Path):
+    """Put `paths` back to how HEAD has them for the block, then restore them exactly.
+
+    Plain file writes, not `git stash`: what comes back is the bytes that were
+    there, whatever the block did in between, with no merge to conflict. Each
+    file is also copied into `backup_dir` first, so if the process is killed
+    mid-block the work is still on disk to copy back by hand.
+    """
+    saved: dict[str, bytes | None] = {}
+    for rel in paths:
+        path = Path(repo) / rel
+        saved[rel] = path.read_bytes() if path.is_file() else None
+        if saved[rel] is not None:
+            _put(Path(backup_dir) / rel, saved[rel])
+    try:
+        for rel in paths:
+            _put(Path(repo) / rel, _head_blob(rel, repo))
+        yield
+    finally:
+        for rel, content in saved.items():
+            _put(Path(repo) / rel, content)

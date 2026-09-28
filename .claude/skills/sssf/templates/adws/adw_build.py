@@ -31,14 +31,15 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
     with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the request")) as ph:
         ph.call(AgentCall(output_type=BuildOutput, prompt=prompt,
-                          gates=[gates.diff_matches_claims]))
+                          gates=[gates.diff_matches_claims, gates.tests_fail_without_change]))
 
     return run.finish()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("prompt", help="inline text or a path to a prompt file")
+    parser.add_argument("prompt", help="inline text, a path to a prompt file, or a GitHub "
+                        "issue (\"#42\" or its URL)")
     parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
     parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
     args = parser.parse_args()

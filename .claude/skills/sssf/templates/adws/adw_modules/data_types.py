@@ -93,6 +93,10 @@ class PlanOutput(EnvelopeBase):
 class BuildOutput(EnvelopeBase):
     changed_files: list[str] = Field(default_factory=list)
     commit_message: str = ""        # consumed by the git commit phase
+    # Test-first, reported so it can be checked: the gate tests_fail_without_change
+    # reverts everything EXCEPT these and requires the suite to fail.
+    test_files: list[str] = Field(default_factory=list)
+    no_new_tests_reason: str = ""   # a change with no new behaviour says why, instead
 
 
 class ScoutFinding(BaseModel):
@@ -375,6 +379,39 @@ class WorktreeConfig(BaseModel):
     setup: list[list[str]] = Field(default_factory=list)   # e.g. [[bun, install]]
 
 
+class IssueLink(BaseModel):
+    """Another issue, as far as a run needs to name it."""
+    number: int
+    title: str = ""
+    url: str = ""
+    state: str = "open"
+    labels: list[str] = Field(default_factory=list)
+
+
+class Issue(BaseModel):
+    """A GitHub issue that is a run's request: a ticket, or a spec with no tickets.
+
+    Read once, before anything spawns (see issues.py). Everything a later phase
+    needs is on it, so nothing asks GitHub the same question twice.
+    """
+    repo: str                       # [HOST/]OWNER/REPO — always origin's, where the PR goes
+    number: int
+    title: str
+    url: str
+    state: str = "open"
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    ready_label: str = "ready-for-agent"   # this repo's name for it (triage-labels.md)
+    parent: Optional[IssueLink] = None
+    parent_body: str = ""
+    comments: list[str] = Field(default_factory=list)      # maintainers' only, rendered
+    checklist: list[str] = Field(default_factory=list)     # what the review rules on
+    checklist_source: str = ""      # the section it came from: "Acceptance criteria", "User Stories"
+    tickets: list[IssueLink] = Field(default_factory=list)   # sub-issues: a spec that was split
+    blockers: list[IssueLink] = Field(default_factory=list)  # every "blocked by", open or closed
+    open_prs: list[str] = Field(default_factory=list)        # PRs that already close it
+
+
 class RunOptions(BaseModel):
     """How an ADW was asked to run — the CLI flags, as one object (rule 4)."""
     config: str = "adws/adw_sssf_config/sssf.config.yaml"
@@ -384,6 +421,7 @@ class RunOptions(BaseModel):
     in_place: bool = False
     allow_dirty: bool = False                               # in place only
     land: Literal["branch", "merge", "pr"] = "branch"       # what happens after the commit
+    issue: Optional[Issue] = None   # the request was `#42` or an issue URL (issues.py)
 
 
 class ObservabilityConfig(BaseModel):

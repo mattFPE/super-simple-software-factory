@@ -236,11 +236,13 @@ class EnvelopeBase(BaseModel):
 class BuildOutput(EnvelopeBase):
     changed_files: list[str] = Field(default_factory=list)
     commit_message: str = ""        # consumed by the git commit phase
+    test_files: list[str] = Field(default_factory=list)   # written first, checked red
+    no_new_tests_reason: str = ""   # a change with no new behaviour says why instead
 ```
 
 Determinism is wired into every step. Agents must return a specific structure, every time. If it does not parse, they get asked again until it does.
 
-Gates verify claims, never predictions. Nobody knows which files an agent will touch before it finishes, so gates run **after** the fact against the envelope's own declarations: `artifacts_exist`, `files_non_empty`, `json_parses`, `diff_matches_claims`, `tests_pass(...)`. A gate is a callable with the signature `gate(envelope, run) -> GateReport`, one `check(item, ok, note)` per thing it examined, so a green gate tells you *what* it verified.
+Gates verify claims, never predictions. Nobody knows which files an agent will touch before it finishes, so gates run **after** the fact against the envelope's own declarations: `artifacts_exist`, `files_non_empty`, `json_parses`, `diff_matches_claims`, `tests_pass(...)`, `tests_fail_without_change`, `checklist_covered(prompt)`. A gate is a callable with the signature `gate(envelope, run) -> GateReport`, one `check(item, ok, note)` per thing it examined, so a green gate tells you *what* it verified.
 
 When JSON does not parse or a gate returns violations, **nothing restarts**. The harness re-prompts the same session with a correction naming exactly what was wrong, and the context window stays intact. Pi treats `--session-id` as create-or-continue, so running an agent and continuing it are the same call. A cold restart throws away everything the agent learned. A correction costs one message.
 
@@ -308,7 +310,7 @@ The skill is also what an agent reads to *operate* the factory. `SKILL.md` is th
 Every ADW takes the same shape:
 
 ```bash
-uv run adws/adw_*.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
+uv run adws/adw_*.py "<prompt, path/to/prompt.md, or #42>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
 ```
 
 | ADW | Chain | Reach for it when |
@@ -334,6 +336,32 @@ uv run adws/adw_*.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_con
 uv run adws/adw_plan.py "add a /health endpoint"              # prints adw_id a1b2c3d4
 uv run adws/adw_build_test.py "implement the plan" --adw-id a1b2c3d4
 ```
+
+### A GitHub issue as the request
+
+If your repo tracks work as GitHub issues, for example specs from `/to-spec` and tickets from `/to-tickets` in [mattpocock/skills](https://github.com/mattpocock/skills), the issue is the prompt:
+
+```bash
+just sdlc "#42"                                   # quoted: an unquoted # starts a comment
+uv run adws/adw_simple_sdlc.py https://github.com/<owner>/<repo>/issues/42
+```
+
+The run reads the issue from `origin` (never gh's default, which in a fork is the parent) along with its parent spec, its maintainers' comments and its acceptance criteria. For a spec, it reads the user stories instead of acceptance criteria. The tracker decides what may run, so no flag does:
+
+| The issue is… | What happens |
+|---|---|
+| not labelled ready-for-agent | refused. The body is text anyone could have written; the label is the triager's say-so. The label name comes from `docs/agents/triage-labels.md` when `/setup-matt-pocock-skills` wrote one |
+| a ticket | runs, with the parent spec attached as context only |
+| a spec with no tickets | runs as its own ticket. A small spec is not forced into a split |
+| a spec with tickets | refused, naming the tickets and which of them are ready |
+| blocked by an open issue | refused until the blocker closes (native dependencies, or the ticket's `## Blocked by`) |
+| labelled `agent-running`, or an open PR already closes it | refused; `--force` overrides after a hard kill |
+
+A committing chain labels the issue `agent-running` while it works and defaults to `--pr` (`--branch` keeps it local). The PR says `Closes #42` and carries the run's test-first and review-checklist results. When the run ends, however it ends, it removes the label and comments on the issue with the outcome. A failure leaves `ready-for-agent` on, so rerunning is just rerunning.
+
+### Test-first, checked
+
+The builder works in red-green slices: one test at a public seam, watch it fail, the least code to pass, then the next behaviour. It reports its test files, and the `tests_fail_without_change` gate checks what test-first buys you. It puts every other changed file back to HEAD, runs `quality.test`, and requires the suite to **fail**. A tautological test, or one that never reaches the new code, passes there, and that is the violation, sent back to the builder as a correction. A change with no new behaviour (a prefactor, docs, config) declares no tests and gives a `no_new_tests_reason`, which ends up in the PR. The check runs only in a worktree, because in your checkout putting files back could overwrite edits you are making.
 
 Watch a run with the trace db directly:
 

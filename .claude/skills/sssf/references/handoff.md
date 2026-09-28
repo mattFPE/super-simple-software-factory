@@ -37,6 +37,8 @@ class PlanOutput(EnvelopeBase):
 class BuildOutput(EnvelopeBase):
     changed_files: list[str] = []
     commit_message: str = ""            # consumed by the git commit phase
+    test_files: list[str] = []          # tests written first; the red check keeps only these
+    no_new_tests_reason: str = ""       # instead of test_files, for a change with no new behaviour
 
 class ScoutOutput(EnvelopeBase):
     findings: list[ScoutFinding] = []   # ScoutFinding: {file: str, note: str}

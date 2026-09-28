@@ -18,9 +18,9 @@
 
 Confirm that the work reported in `previous_envelope` is what was asked for.
 
-1. Establish the spec: read `<context_handoff_dir>/plan.md` if it exists, else use `prompt`.
+1. Establish the spec: read `<context_handoff_dir>/plan.md` if it exists, else use `prompt`. Items under a `# Review checklist` heading in `prompt` are requirements either way.
 2. Read the code that was actually written, starting from `previous_envelope.changed_files`.
-3. Rule on every requirement in the spec — one `findings` entry each, with evidence.
+3. Rule on every requirement in the spec — one `findings` entry each, with evidence. A checklist item's `requirement` is the item's text, verbatim.
 4. Write the review to `<context_handoff_dir>/review.md`, then emit your `Report` JSON.
 
 ## Report

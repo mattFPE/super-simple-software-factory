@@ -43,6 +43,8 @@ demo:
 # ── run a workflow ──────────────────────────────────────────────────────────
 # Args pass straight through: "<prompt or path/to/prompt.md>" [--adw-id X]
 # Committing ones also take --merge | --pr, or --in-place [--allow-dirty].
+# A GitHub issue is a prompt too: just sdlc "#42" — quoted, or # starts a
+# comment. It must be labelled ready-for-agent, and lands as a PR closing it.
 
 # one agent, one prompt: just prompt "summarize this repo"
 prompt *ARGS:

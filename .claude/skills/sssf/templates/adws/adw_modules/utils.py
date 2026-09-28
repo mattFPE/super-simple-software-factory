@@ -88,7 +88,13 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 def resolve_prompt(arg: str) -> str:
-    """CLI prompt arg: a file path resolves to its contents, else inline text."""
+    """CLI prompt arg: an issue (`#42`, or its URL) resolves to the issue as a
+    request, a file path to its contents, anything else is inline text."""
+    from . import issues                  # here: issues imports this module
+    if issues.parse_ref(arg):
+        issue = issues.load(arg)
+        issues.require_ready(issue)       # untrusted text never reaches an agent
+        return issues.as_prompt(issue)
     try:
         p = Path(arg)
         if p.is_file():

@@ -5,11 +5,15 @@
 """ADW Plan Build Test — the full starter chain.
 
 Usage:
-    uv run adws/adw_plan_build_test.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
-        [--merge | --pr] [--in-place [--allow-dirty]]
+    uv run adws/adw_plan_build_test.py "<prompt, path/to/prompt.md, or #42>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
+        [--branch | --merge | --pr] [--in-place [--allow-dirty]] [--force]
 
 Runs in its own worktree on branch sssf/<adw_id> (see adw_modules/worktree.py);
 your checkout is never touched. --in-place works in your checkout instead.
+
+An issue as the prompt (`"#42"` or its URL; see adw_modules/issues.py) must be
+labelled ready-for-agent and unblocked. The run claims it, lands as a PR that
+closes it, and comments on it with the outcome.
 
 Phases: engineer(request) -> planner -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded] -> git(commit)
 
@@ -21,7 +25,7 @@ builder as an envelope, and only an exhausted fix loop fails the run.
 import argparse
 import sys
 
-from adw_modules import agents, gates, git_helper, quality, session, utils, worktree
+from adw_modules import agents, gates, git_helper, issues, quality, session, utils, worktree
 from adw_modules.data_types import AgentCall, BuildOutput, PhaseParams, PlanOutput, RunOptions
 
 REQUIRED_AGENTS = ["planner", "builder"]
@@ -44,6 +48,7 @@ def main(prompt: str, opts: RunOptions) -> int:
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt)
 
+    issues.claim(run, opts)               # no-op unless the request is an issue
     worktree.enter(run, opts)             # no-op with --in-place
 
     with run.phase(PhaseParams(name="plan", kind="agent", owner="planner",
@@ -51,10 +56,11 @@ def main(prompt: str, opts: RunOptions) -> int:
         plan = ph.call(AgentCall(output_type=PlanOutput, prompt=prompt,
                                  gates=[gates.artifacts_exist, gates.files_non_empty]))
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
-                               description="Implement the plan exactly")) as ph:
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
+                               description="Implement the plan exactly, test-first")) as ph:
         previous = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=plan,
-                                     gates=[gates.artifacts_exist]))
+                                     gates=[gates.artifacts_exist,
+                                            gates.tests_fail_without_change]))
 
     test = None
     for i in range(1, MAX_FIX_LOOPS + 1):
@@ -90,7 +96,8 @@ def main(prompt: str, opts: RunOptions) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("prompt", help="inline text or a path to a prompt file")
+    parser.add_argument("prompt", help="inline text, a path to a prompt file, or a GitHub "
+                        "issue (\"#42\" or its URL)")
     session.add_cli_args(parser, commits=True)
     args = parser.parse_args()
     sys.exit(main(utils.resolve_prompt(args.prompt), session.cli_options(args)))

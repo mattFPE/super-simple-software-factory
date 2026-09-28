@@ -61,6 +61,28 @@ class Run:
         self._agent_map_path = self.session_dir / "agent_map.json"
         self.agent_map: dict = (json.loads(self._agent_map_path.read_text())
                                 if self._agent_map_path.exists() else {})
+        # What the run has to say for itself, keyed by topic ("tests", "review"):
+        # markdown the PR description and the issue comment carry. A later write
+        # replaces an earlier one, so a retried gate reports its final word.
+        self.report: dict[str, str] = {}
+        self.landed: dict = {}                     # worktree.land()'s outcome
+        self.not_accepted = ""                     # finish()'s reason, when it refused
+        self._settle_hooks: list = []
+
+    # ── settling (the session row has its final status; tell anyone waiting) ─
+    def when_settled(self, hook) -> None:
+        """Call `hook(ok)` once, however the run ends: finish(), a failed phase,
+        or an exit that skipped both (a kill between phases, a crash)."""
+        self._settle_hooks.append(hook)
+
+    def settle(self, ok: bool) -> None:
+        """Run the settle hooks, once — whoever calls first. The status is final."""
+        hooks, self._settle_hooks = self._settle_hooks, []
+        for hook in hooks:
+            try:
+                hook(ok)
+            except Exception as error:            # a hook never changes the verdict
+                self.console.note(f"after the run: {error}")
 
     # ── agent map (adw_id -> per-agent coding-agent session ids) ────────────
     def save_agent_map(self, agent: str, entry: dict) -> None:
@@ -108,6 +130,7 @@ class Run:
             self.console.phase_ended(phase, time.monotonic() - clock)
             self.console.session_finished(False, self.tokens, self.cost,
                                           self.cfg.observability.db)
+            self.settle(ok=False)
             raise
         else:
             phase.status = "success"
@@ -140,6 +163,7 @@ class Run:
         ok = phases_ok and accepted
         if phases_ok and not accepted:
             note = reason or "the run's acceptance criterion was not met"
+            self.not_accepted = note
             self.tracer.event(EventRecord(
                 adw_id=self.adw_id,
                 phase_id=self.phases[-1].phase_id if self.phases else "",
@@ -148,4 +172,5 @@ class Run:
         self.tracer.session_finish(self.adw_id, ok=ok)
         self.finalized = True
         self.console.session_finished(ok, self.tokens, self.cost, self.cfg.observability.db)
+        self.settle(ok)
         return 0 if ok else 1

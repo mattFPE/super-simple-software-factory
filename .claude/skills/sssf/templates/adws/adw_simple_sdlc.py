@@ -5,11 +5,15 @@
 """ADW Simple SDLC — plan, build, test, review, document, committing as it goes.
 
 Usage:
-    uv run adws/adw_simple_sdlc.py "<prompt or path/to/prompt.md>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
-        [--merge | --pr] [--in-place [--allow-dirty]]
+    uv run adws/adw_simple_sdlc.py "<prompt, path/to/prompt.md, or #42>" [--config adws/adw_sssf_config/sssf.config.yaml] [--adw-id a1b2c3d4]
+        [--branch | --merge | --pr] [--in-place [--allow-dirty]] [--force]
 
 Runs in its own worktree on branch sssf/<adw_id> (see adw_modules/worktree.py);
 your checkout is never touched. --in-place works in your checkout instead.
+
+An issue as the prompt (`"#42"` or its URL; see adw_modules/issues.py) must be
+labelled ready-for-agent and unblocked. The run claims it, lands as a PR that
+closes it, and comments on it with the outcome.
 
 Phases: engineer(request) -> planner -> git(commit_plan)
         -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded]
@@ -48,7 +52,7 @@ pinned before the first commit phase and printed in the request phase.
 import argparse
 import sys
 
-from adw_modules import agents, changes, gates, git_helper, quality, session, utils, worktree
+from adw_modules import agents, changes, gates, git_helper, issues, quality, session, utils, worktree
 from adw_modules.data_types import (AgentCall, BuildOutput, ChangeCapture, DocumentOutput,
                                     PhaseParams, PlanOutput, ReviewOutput, RunOptions)
 
@@ -84,6 +88,7 @@ def main(prompt: str, opts: RunOptions) -> int:
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt, baseline=git_helper.short_sha(baseline))
 
+    issues.claim(run, opts)               # no-op unless the request is an issue
     worktree.enter(run, opts)             # no-op with --in-place
     if run.worktree:                      # a reused worktree may already hold commits:
         baseline = run.worktree["base_sha"]   # measure from where its branch started
@@ -97,10 +102,11 @@ def main(prompt: str, opts: RunOptions) -> int:
                                description="Put the spec on record before any code exists to blur it")) as ph:
         commit(ph, plan)
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
-                               description="Implement the plan exactly")) as ph:
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
+                               description="Implement the plan exactly, test-first")) as ph:
         build = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=plan,
-                                  gates=[gates.diff_matches_claims]))
+                                  gates=[gates.diff_matches_claims,
+                                         gates.tests_fail_without_change]))
 
     test = None
     for i in range(1, MAX_FIX_LOOPS + 1):
@@ -123,10 +129,11 @@ def main(prompt: str, opts: RunOptions) -> int:
     review = None
     revised = False
     for i in range(1, MAX_REVISION_LOOPS + 1):
-        with run.phase(PhaseParams(name=f"review_{i}", kind="agent", owner="reviewer",
+        with run.phase(PhaseParams(name=f"review_{i}", kind="agent", owner="reviewer", retries=1,
                                    description="Confirm the build matches the plan")) as ph:
             review = ph.call(AgentCall(output_type=ReviewOutput, prompt=prompt, previous=build,
-                                       gates=[gates.artifacts_exist, gates.verdict_consistent]))
+                                       gates=[gates.artifacts_exist, gates.verdict_consistent,
+                                              gates.checklist_covered(prompt)]))
 
         if review.approved or i == MAX_REVISION_LOOPS:
             break
@@ -188,7 +195,8 @@ def main(prompt: str, opts: RunOptions) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("prompt", help="inline text or a path to a prompt file")
+    parser.add_argument("prompt", help="inline text, a path to a prompt file, or a GitHub "
+                        "issue (\"#42\" or its URL)")
     session.add_cli_args(parser, commits=True)
     args = parser.parse_args()
     sys.exit(main(utils.resolve_prompt(args.prompt), session.cli_options(args)))

@@ -23,7 +23,9 @@ uv run adws/<recon-chain>.py "where is auth handled" --config path/to/other.conf
 
 **A chain that commits runs in its own worktree** (`../<repo>.sssf-worktrees/<adw_id>`, branch `sssf/<adw_id>`) and never touches the engineer's checkout. It builds on their last commit, not on uncommitted edits, so say so if they have some. It ends as a branch unless they asked for `--merge` or `--pr`; `--in-place` is the old behaviour. After a run, report the branch and how to take it (`git merge sssf/<id>`), and on failure where the kept worktree is.
 
-The prompt is inline text or a file path. Launch in the background so you can poll while it works; the `adw_id` is printed on startup — capture it, everything else keys off it.
+The prompt is inline text, a file path, or a GitHub issue (`"#42"` or its URL). Launch in the background so you can poll while it works; the `adw_id` is printed on startup — capture it, everything else keys off it.
+
+**An issue runs as a ticket** (`adw_modules/issues.py`). It must carry the repo's ready-for-agent label (mapped in `docs/agents/triage-labels.md` when `/setup-matt-pocock-skills` wrote one), and a committing chain also refuses it when it is closed, has an open blocker, is a spec already split into tickets, or is labelled `agent-running` / has an open PR that closes it (`--force` overrides only those last two). The run labels it `agent-running` in a `claim` phase, defaults to `--pr` with `Closes #42` in the body, and when it ends removes the label and comments with the outcome, including on failure and Ctrl+C. After the run, report the PR link. On a failure, the issue comment already carries the rerun command.
 
 ### Listen for the roster
 
