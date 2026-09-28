@@ -88,12 +88,22 @@ procs ADW_ID:
 
 # ── observability UI ────────────────────────────────────────────────────────
 
-# Needs bun. ONE foreground process: the UI is built into dist/ and the API
-# server serves it, so Ctrl+C stops everything — nothing is left holding a port.
+# Needs bun. The UI is built into dist/ and ONE server process serves it. It
+# runs in the background, so your terminal stays free; `obs-stop` ends it by
+# asking the server for its own pid (server/obs.ts), so nothing is left behind.
 # The db path is passed explicitly because the server runs from the app dir and
 # would otherwise look for a trace db sitting next to itself. It is
 # single-quoted because on Windows it is a C:\... path, and sh eats unquoted \.
+viz := ".claude/skills/sssf/apps/visualizer"
 
-# boot the trace UI, http://localhost:4600 (Ctrl+C stops it)
+# start the trace UI in the background, http://localhost:4600
 obs:
-    cd .claude/skills/sssf/apps/visualizer && bun install && bunx vite build --logLevel warn && SSSF_DB='{{justfile_directory()}}/{{db}}' exec bun run server/index.ts
+    @cd {{viz}} && bun install --silent && bun run server/obs.ts start --db '{{justfile_directory()}}/{{db}}'
+
+# stop the background trace UI
+obs-stop:
+    @cd {{viz}} && bun run server/obs.ts stop
+
+# is the trace UI running, and on which db
+obs-status:
+    @cd {{viz}} && bun run server/obs.ts status

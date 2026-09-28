@@ -296,6 +296,9 @@ export type GatesResponse = GateResult[];
 /** GET /api/health */
 export interface HealthResponse {
   ok: boolean;
+  /** Identifies this server, so `obs.ts stop` never kills a stranger on the port. */
+  service: "sssf-visualizer";
+  pid: number;
   db: string;
   journal_mode: string;
   sessions: number;

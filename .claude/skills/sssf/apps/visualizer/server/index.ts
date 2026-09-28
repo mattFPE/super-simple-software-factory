@@ -119,6 +119,8 @@ const server = Bun.serve({
       () =>
         json({
           ok: true,
+          service: "sssf-visualizer",
+          pid: process.pid,
           db: db.path,
           journal_mode: db.journalMode,
           sessions: db.sessionCount(),

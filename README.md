@@ -74,7 +74,7 @@ git init && git commit --allow-empty -m init     # chains that end in a commit p
 # 3. smoke test: two cheap read-only runs, end to end
 just demo
 just sessions              # what just happened
-just obs                   # the trace UI, needs bun
+just obs                   # the trace UI in the background, needs bun (just obs-stop ends it)
 
 # no just? every recipe is one line. the raw form of `just demo` is:
 uv run adws/adw_prompt.py "reply with a one-line summary of this repo" --agent scout
