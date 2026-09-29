@@ -129,11 +129,23 @@ def read_manifest(root: Path) -> dict[str, str]:
     return data.get("files", {}) if isinstance(data.get("files"), dict) else data
 
 
+def read_source(root: Path) -> dict:
+    """The source the stamp recorded; {} for a stamp from before sources were."""
+    path = root / MANIFEST
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return (data.get("source") or {}) if isinstance(data.get("files"), dict) else {}
+
+
 def write_manifest(root: Path, files: dict[str, str]) -> None:
     path = root / MANIFEST
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"source": source_info(root), "files": dict(sorted(files.items()))}
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    text = json.dumps(data, indent=2) + "\n"
+    # Unchanged means untouched: a rewrite on Windows would leave CRLF where a
+    # repo keeps LF, and git would list the stamp as modified after a no-op.
+    if path.is_file() and path.read_text(encoding="utf-8").replace("\r\n", "\n") == text:
+        return
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def source_info(root: Path) -> dict:
@@ -364,7 +376,13 @@ def update(root: Path, overwrite_edited: bool, allow_dirty: bool) -> int:
     ensure_gitignore(root, gitignore)
     notes += gitignore
     notes += refresh_skill_copy(root)
-    write_manifest(root, manifest)
+    # A no-op leaves the stamp alone, unless it has no source yet or the source
+    # moved (a first --source): rewriting it only to note, say, that the source
+    # checkout has uncommitted edits would make every no-op update a diff.
+    old, new = read_source(root), source_info(root)
+    moved = (old.get("path"), old.get("git")) != (new.get("path"), new.get("git"))
+    if plan.added or plan.updated or plan.conflicts or notes or moved:
+        write_manifest(root, manifest)
 
     print(f"sssf updated in {root} from {SKILL}")
     report("added (new in this version)", [t.rel for t in plan.added])
