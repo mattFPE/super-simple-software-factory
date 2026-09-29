@@ -280,6 +280,9 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
         "--session-id", request.session_id,
         "--session-dir", request.session_dir,
         "--system-prompt", request.system_prompt,
+        # Skills are offered in the system prompt from the roster's list
+        # (skills.py); none are discovered from this machine or the repo.
+        "--no-skills",
     ]
     if request.tools:
         cmd += ["--tools", ",".join(request.tools)]

@@ -84,6 +84,16 @@ Entries are pi extension **file paths**, passed through as `pi -e <path>`, appli
 
 Skip the second half and it fails silently: extension loaded, run green, tool never available to the model. Extensions that only shape output or register flags — no new tool — need no `tools` change.
 
+## Give an agent skills
+
+```yaml
+  - name: builder
+    skills:
+      - adws/adw_data/skills/netsuite/     # a skill directory, or a directory of them
+```
+
+Copy the skills into `adws/adw_data/skills/` first, from a plugin (`~/.claude/plugins/cache/.../skills/<skill>`) or wherever they come from. An agent gets only the skills its list names; nothing installed on the machine reaches it. Give each agent the skills its job needs: the builder a coding guide, the reviewer the same guide to check against, the scout a reference to look things up in. Every skill costs a line of system prompt on every call. The agent needs `read` or `bash` in its tools, and `validate()` checks every entry before anything spawns. See [Skills](../references/config.md#skills).
+
 ## Add a new agent
 
 Three steps, all required — skipping any one fails `agents.validate()` at ADW startup, before anything spawns:

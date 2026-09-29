@@ -6,6 +6,12 @@ defaults:
   model: google/gemini-3.6-flash   # provider/id — a bare pattern is ambiguous across providers
   thinking: medium                 # off | minimal | low | medium | high | xhigh | max
   harness_engineering: []          # pi extensions loaded into the harness (-e)
+  # Agent Skills an agent may use: skill directories, or directories of them.
+  # Only these, on both coding agents. Nothing is discovered from this machine
+  # or the repo. An agent's own `skills:` replaces this list. Keep them in the
+  # repo (adws/adw_data/skills/), where every machine sees the same ones and no
+  # agent may edit them. See references/config.md#skills.
+  skills: []                       # e.g. [adws/adw_data/skills/netsuite/]
   # Roster-wide allowlist; any agent may override with its own list.
   # NOTE: --tools filters extension and custom tools too, not just builtins. An agent
   # whose harness_engineering extension registers a tool MUST name that tool in its own

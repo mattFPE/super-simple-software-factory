@@ -12,6 +12,7 @@ defaults:
   model: google/gemini-3.6-flash        # ALWAYS provider/model-id
   thinking: medium
   harness_engineering: []
+  skills: []
   tools: [read, bash, edit, write, grep, find, ls]
   data_dir: adws/adw_data
 
@@ -47,9 +48,10 @@ agents:
 | `thinking` | enum | Reasoning effort — see below. Default `medium`. |
 | `color` | hex string | Lane color for every agent that does not set its own. Default empty — the visualizer falls back to its own palette. |
 | `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension files (`-e`). Claude Code: plugin directories (`--plugin-dir`); a `.ts` pi extension fails validation. |
+| `skills` | list[path] | Roster-wide [skills](#skills). Every agent that omits its own `skills` inherits this. Default `[]`. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
 | `idle_timeout_seconds` | int | Seconds with no output from an agent before its whole process tree is killed and the phase fails. Default `600`; `0` never kills. Per-agent overridable. |
-| `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`, `.github/` — an agent must not be able to edit the machinery that decides whether its work passed, and that includes CI: a pushed branch's workflows run with the repo's secrets before anyone reviews the PR. |
+| `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`, `.github/` — an agent must not be able to edit the machinery that decides whether its work passed, and that includes CI: a pushed branch's workflows run with the repo's secrets before anyone reviews the PR. Every skill the roster names inside the repo is protected too, whether it is listed here or not. |
 | `data_dir` | path | Runtime home. Sessions land at `{data_dir}/sessions/{adw_id}/{agent_name}/`. Default `adws/adw_data`. |
 
 ### `observability`
@@ -105,7 +107,7 @@ The PR stays open either way. A run that fails its checks has already removed it
 | `prompt_engineering.system` | yes | Path to the system prompt — who the agent is, its single purpose, its output contract. |
 | `prompt_engineering.user` | yes | Path to the default user prompt — the task template with `{{prompt}}`, `{{previous_envelope}}`, `{{context_handoff_dir}}`. |
 | `color` | no | Hex swatch (`"#a78bfa"`) for this agent's lane in the visualizer. Travels config → `agent_sessions.color` → `/api/sessions/:adw_id`, and rides the `agent_start` event so a lane is colored while the agent is still running. Unset = the UI's fallback palette. |
-| `coding_agent`, `model`, `thinking`, `color`, `harness_engineering`, `idle_timeout_seconds` | no | Override the corresponding `defaults` key. |
+| `coding_agent`, `model`, `thinking`, `color`, `harness_engineering`, `skills`, `idle_timeout_seconds` | no | Override the corresponding `defaults` key. An agent's own `skills` replaces the default list; it doesn't add to it. |
 | `tools` | no | Allowlist. **Omitting the key means all tools usable.** A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. Naming a `protected_files` path here is what unlocks it. **The session runtime under `data_dir` is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
 
@@ -251,6 +253,32 @@ This fails quietly. The extension still loads, the run still succeeds, and the t
 ```
 
 Rule: **every entry in `harness_engineering` that registers a tool must have that tool name added to the agent's `tools` list.** Adding an extension is therefore a two-line change, never one. The alternative is dropping the `tools` key *and* leaving `defaults.tools` unset so the agent resolves to `None` (all tools) — but with a roster-wide `defaults.tools` in place, that escape hatch is closed; naming the tool is the only path.
+
+## Skills
+
+An agent gets exactly the [Agent Skills](https://agentskills.io/specification) its `skills:` list names, and no others. Neither coding agent finds skills on its own: pi runs with `--no-skills` and Claude Code with `--disable-slash-commands`. So your installed skills and plugins never reach an agent, and neither do the skills a repo keeps in `.claude/skills/`, `.pi/skills/` or `.agents/skills/`. Found skills would change with the machine, and even with the shell that launched the run. They would include the operator's own tools, which reach outside the repo where `permissions.py` can't see, and workflows of their own that compete with the agent's one job.
+
+```yaml
+agents:
+  - name: builder
+    skills:
+      - adws/adw_data/skills/netsuite/                          # every skill under it
+  - name: reviewer
+    skills:
+      - adws/adw_data/skills/netsuite/netsuite-sdf-safe-guide/  # one skill
+```
+
+An entry is a skill directory (holding `SKILL.md`), a `SKILL.md` file, or a directory searched for every `SKILL.md` below it. `agents.validate()` fails before anything spawns if an entry is missing or holds no skill, if a `SKILL.md` has no `name` or `description` in its frontmatter, if two skills share a name, or if the agent has a `tools` list with neither `read` nor `bash` to open them.
+
+Skills are offered the same way on both coding agents, the way pi offers its own. Each skill's name, description and `SKILL.md` path go into the system prompt, and the agent reads a skill's instructions only when its task matches. The system prompt says that where a skill disagrees with the agent's own instructions (what to produce, which files it may change, the shape of its report), the agent's own instructions win. The block lands in the saved `prompts/system.md`, and the `agent_start` event records the skill names, so the trace shows what each agent was offered.
+
+**Keep skills in the repo**, under `adws/adw_data/skills/`. Then every machine offers the same ones, in the version you committed. A skill inside the repo is also protected like `protected_files`, because skills are read when needed, not when the run starts: a builder that edited one would rewrite what the reviewer reads next. An agent that names the path in its own `writes` may edit it. A skill outside the repo, such as a plugin cache, works but can't be protected. To bring in an installed plugin's skills, copy them in:
+
+```bash
+cp -r ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill> adws/adw_data/skills/
+```
+
+A Claude Code plugin loaded through `harness_engineering` doesn't bring its skills with it. List them in `skills` instead.
 
 ## Harness engineering
 

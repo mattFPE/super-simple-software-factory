@@ -252,7 +252,8 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
         # Nobody is there to answer a prompt, so there must be none to answer.
         "--permission-mode", "bypassPermissions",
         # The operator's MCP servers (production connectors included) and
-        # skills are theirs, not the agent's.
+        # skills are theirs, not the agent's. The skills the roster names are
+        # offered in the system prompt instead (skills.py), as for pi.
         "--strict-mcp-config", "--disable-slash-commands",
     ]
     cmd += ["--resume", claude_uuid] if state is not None else ["--session-id", claude_uuid]

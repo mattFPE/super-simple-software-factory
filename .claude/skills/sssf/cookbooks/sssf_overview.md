@@ -29,6 +29,7 @@ adws/
 │   ├── worktree.py              a committing run's own worktree + branch sssf/<adw_id>; lands as branch/merge/PR
 │   ├── ci.py                    with pr.wait_for_checks: wait for the PR's CI, and take its verdict
 │   ├── issues.py                a GitHub issue as the request: trust + readiness checks, claim, outcome comment
+│   ├── skills.py                the Agent Skills a roster names: checked, offered in the system prompt, protected
 │   ├── quality.py, procs.py     known commands from config · agent idle watchdog + process-tree kill
 │   ├── prompts.py, session.py, tracer.py, console.py, git_helper.py, utils.py
 └── adw_data/

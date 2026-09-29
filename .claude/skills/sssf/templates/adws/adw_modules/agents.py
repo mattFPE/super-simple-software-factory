@@ -16,7 +16,7 @@ from typing import Optional
 
 import yaml
 
-from . import agent_cc, agent_pi, permissions, prompts, quality as quality_blocks
+from . import agent_cc, agent_pi, permissions, prompts, quality as quality_blocks, skills
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
                          GateCheck, GateReport, Phase, PiRequest, PiResult, SSSFConfig,
                          UsageBreakdown)
@@ -44,6 +44,7 @@ def load_config(path: str = "adws/adw_sssf_config/sssf.config.yaml") -> SSSFConf
             if key in defaults:
                 agent.setdefault(key, defaults[key])
         agent.setdefault("harness_engineering", defaults.get("harness_engineering", []))
+        agent.setdefault("skills", defaults.get("skills", []))
     cfg = SSSFConfig(**raw)
     for agent in cfg.agents:
         _settle_model(agent)
@@ -102,6 +103,7 @@ def validate(cfg: SSSFConfig, required: list[str], quality: list[str] = ()) -> N
         if agent.coding_agent == "claude_code":
             problems += [f"agent {name!r}: {p}"
                          for p in agent_cc.preflight(agent.harness_engineering)]
+        problems += [f"agent {name!r}: {p}" for p in skills.check(agent)[1]]
     if problems:
         raise SystemExit("config validation failed:\n- " + "\n- ".join(problems))
 
@@ -120,6 +122,9 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
         "context_handoff_dir": str(run.context_handoff_dir),
     }
     system_text = prompts.render(agent.prompt_engineering.system, variables)
+    offered = skills.resolve(agent)       # validate() checked them; read again, as they are now
+    if offered:                           # in the saved system.md too: the trace shows what it was offered
+        system_text = f"{system_text.rstrip()}\n\n{skills.prompt_block(offered)}\n"
     user_text = prompts.render(agent.prompt_engineering.user, variables)
     prompts.save(agent_dir / "prompts", "system.md", system_text)
     prompts.save(agent_dir / "prompts", "user.md", user_text)
@@ -139,7 +144,8 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
                                           "coding_agent": agent.coding_agent,
                                           "purpose": agent.purpose,
                                           "tools": agent.tools,  # None = all tools
-                                          "harness_engineering": agent.harness_engineering}))
+                                          "harness_engineering": agent.harness_engineering,
+                                          "skills": [s.name for s in offered]}))
     run.console.agent_started(agent.name, agent.model, session_id)
 
     # Parse retries and gate corrections re-enter the SAME session, so the

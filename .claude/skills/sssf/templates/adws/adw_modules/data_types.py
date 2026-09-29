@@ -318,6 +318,10 @@ class AgentConfig(BaseModel):
     purpose: str = ""
     prompt_engineering: PromptEngineering
     harness_engineering: list[str] = Field(default_factory=list)
+    # Agent Skills this agent may use (see skills.py): skill directories, or
+    # directories of them. Nothing else is discovered — not the operator's
+    # installed skills, not the repo's own.
+    skills: list[str] = Field(default_factory=list)
     tools: Optional[list[str]] = None    # allowlist; None = all tools usable
     # What this agent may MODIFY in the repo, enforced in code after every call
     # (see adw_modules/permissions.py). `tools` cannot express this: `bash` runs
@@ -339,6 +343,7 @@ class ConfigDefaults(BaseModel):
     thinking: str = "medium"
     color: str = ""
     harness_engineering: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)   # inherited by agents without their own
     tools: Optional[list[str]] = None    # roster-wide allowlist; None = all tools usable
     idle_timeout_seconds: int = 600      # per-agent overridable; 0 = never kill
     # Off-limits to every agent that has not named them in its own `writes`.
@@ -432,6 +437,13 @@ class RunOptions(BaseModel):
     allow_dirty: bool = False                               # in place only
     land: Literal["branch", "merge", "pr"] = "branch"       # what happens after the commit
     issue: Optional[Issue] = None   # the request was `#42` or an issue URL (issues.py)
+
+
+class Skill(BaseModel):
+    """One Agent Skill an agent is offered: what it is for, and where to read it."""
+    name: str
+    description: str
+    file: str                       # absolute path to its SKILL.md
 
 
 class ObservabilityConfig(BaseModel):
