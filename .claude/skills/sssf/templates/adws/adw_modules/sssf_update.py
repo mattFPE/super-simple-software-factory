@@ -77,7 +77,10 @@ def _installer(given: str | None, ref: str | None, source: dict) -> Path:
             raise RuntimeError(f"no sssf installer under {given} "
                                f"(looked for scripts/install.py and {skill_dir}/scripts/install.py)")
         return _no_ref(found, ref)
-    if source.get("path") and (found := _in_path(Path(source["path"]), skill_dir)):
+    # A recorded path inside the cache is where the LAST git update ran from:
+    # using it as a path would skip the fetch, and no update would ever arrive.
+    path = Path(source["path"]) if source.get("path") else None
+    if path and not _in_cache(path) and (found := _in_path(path, skill_dir)):
         return _no_ref(found, ref)
     if source.get("git"):
         return _from_git(source["git"], ref, skill_dir)
@@ -104,9 +107,17 @@ def _is_url(text: str) -> bool:
     return bool(re.match(r"^(\w+://|[\w.-]+@[\w.-]+:)", text))
 
 
+def _cache() -> Path:
+    return Path(os.environ.get("SSSF_CACHE") or Path.home() / ".cache" / "sssf").resolve()
+
+
+def _in_cache(path: Path) -> bool:
+    return path.resolve().is_relative_to(_cache())
+
+
 def _from_git(url: str, ref: str | None, skill_dir: str) -> Path:
     """A clone of `url` in the cache, fetched and checked out at `ref`."""
-    cache = Path(os.environ.get("SSSF_CACHE") or Path.home() / ".cache" / "sssf")
+    cache = _cache()
     # The repo's name plus a hash of the URL: unique, and short, because git
     # for Windows refuses a clone whose paths outgrow MAX_PATH.
     name = re.sub(r"\.git$", "", url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]) or "sssf"
