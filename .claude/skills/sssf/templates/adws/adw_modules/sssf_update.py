@@ -22,6 +22,7 @@ adw_modules is out of date, or broken.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -106,7 +107,11 @@ def _is_url(text: str) -> bool:
 def _from_git(url: str, ref: str | None, skill_dir: str) -> Path:
     """A clone of `url` in the cache, fetched and checked out at `ref`."""
     cache = Path(os.environ.get("SSSF_CACHE") or Path.home() / ".cache" / "sssf")
-    clone = cache / re.sub(r"[^\w.-]+", "_", re.sub(r"^\w+://|\.git$", "", url)).strip("_")
+    # The repo's name plus a hash of the URL: unique, and short, because git
+    # for Windows refuses a clone whose paths outgrow MAX_PATH.
+    name = re.sub(r"\.git$", "", url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]) or "sssf"
+    safe = re.sub(r"[^\w.-]+", "_", name)
+    clone = cache / f"{safe}-{hashlib.sha1(url.encode()).hexdigest()[:8]}"
     if (clone / ".git").is_dir():
         _run(["git", "-C", str(clone), "fetch", "--quiet", "--tags", "origin"])
     else:
