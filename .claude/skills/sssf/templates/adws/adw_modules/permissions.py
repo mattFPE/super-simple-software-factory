@@ -25,8 +25,8 @@ redo; a breach cannot be corrected by re-prompting, because the write already
 happened. It aborts the phase and names every offending path.
 
 Two keys drive it, both in sssf.config.yaml:
-    defaults.protected_files   paths no agent may touch unless it names them itself
-                               (every skill the roster names in the repo is added)
+    defaults.protected_files   paths no agent may touch unless it names them itself,
+                               added to what protected() always includes
     agents[].writes      None = unrestricted · [] = read-only · [...] = only these
 """
 
@@ -38,6 +38,13 @@ from pathlib import Path
 
 from . import skills
 from .data_types import AgentConfig, SSSFConfig
+
+# Protected in every roster; `defaults.protected_files` adds to these, never
+# replaces them. The factory's own code, because an agent must not be able to
+# edit the machinery that decides whether its work passed. And the repo's CI:
+# it grades the PR, and a pushed branch's workflows run with the repo's
+# secrets before anyone has reviewed them.
+BUILTIN_PROTECTED = ["adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py", ".github/"]
 
 
 class PermissionBreach(RuntimeError):
@@ -110,7 +117,7 @@ def _matches(path: str, pattern: str) -> bool:
 
 
 def always_writable(cfg: SSSFConfig) -> list[str]:
-    """The session runtime, which EVERY agent must be able to write.
+    """The session runtime, `{data_dir}/sessions/`, which EVERY agent must be able to write.
 
     `context_handoff/` is the one place agents hand work to each other, and an
     agent's own prompts, raw_output.jsonl, and envelope.json land beside it.
@@ -122,21 +129,57 @@ def always_writable(cfg: SSSFConfig) -> list[str]:
     is normally ignored, so it never even appears in a snapshot — but an agent's
     ability to record its work must not hang on a gitignore entry that someone
     can delete or that a changed `data_dir` can outgrow.
+
+    Only `sessions/`: the rest of `data_dir` is what agents are TOLD — prompts,
+    harness extensions, skills — and is protected (see protected).
     """
-    return [cfg.defaults.data_dir.rstrip("/") + "/"]
+    return [_data_dir(cfg) + "sessions/"]
+
+
+def _data_dir(cfg: SSSFConfig) -> str:
+    return cfg.defaults.data_dir.rstrip("/") + "/"
+
+
+def protected(cfg: SSSFConfig) -> list[str]:
+    """Every path no agent may touch unless it names it in its own `writes`.
+
+    The built-ins, the roster's own additions, every skill it names inside the
+    repo, and `data_dir` itself outside the session runtime: its prompts and
+    harness extensions are what agents are told, and a builder that could
+    edit the reviewer's system.md could edit its own grading.
+    """
+    paths = [*BUILTIN_PROTECTED, *cfg.defaults.protected_files, *skills.protected(cfg),
+             _data_dir(cfg)]
+    return list(dict.fromkeys(paths))
 
 
 def permitted(path: str, agent: AgentConfig, cfg: SSSFConfig) -> bool:
-    """The agent's own list first, then skills, the session runtime, and what is protected."""
-    if any(_matches(path, p) for p in (agent.writes or [])):
-        return True                      # naming a path is what unlocks a protected one
-    if any(_matches(path, p) for p in skills.protected(cfg)):
-        return False                     # before the runtime: adws/adw_data/skills/ is inside it
+    """The session runtime; then what is protected; then the agent's own list.
+
+    Only a `writes` entry that NAMES a protected area unlocks it: one inside
+    it, like `.github/workflows/` for `.github/`. A broad glob that merely
+    matches, like a documenter's `**/*.md`, would otherwise reach every prompt
+    and SKILL.md in the repo, since they are all markdown.
+    """
     if any(_matches(path, p) for p in always_writable(cfg)):
         return True
-    if any(_matches(path, p) for p in cfg.defaults.protected_files):
-        return False
+    named = [w for w in (agent.writes or []) if _matches(path, w)]
+    guards = [q for q in protected(cfg) if _matches(path, q)]
+    # Nested areas (a skill inside data_dir) count once, as the outermost:
+    # naming anywhere inside it, and matching the path, is naming the area.
+    outer = [q for q in guards
+             if not any(o != q and _literal(q).startswith(_literal(o)) for o in guards)]
+    if outer:
+        return all(any(_literal(w).startswith(_literal(q)) for w in named) for q in outer)
+    if named:
+        return True
     return agent.writes is None          # None = unrestricted, [] = no repo writes
+
+
+def _literal(pattern: str) -> str:
+    """The part of a pattern before its first wildcard: the area it names."""
+    cut = min((i for i in (pattern.find("*"), pattern.find("?")) if i != -1), default=len(pattern))
+    return pattern[:cut]
 
 
 def _roll_back(run, path: str, before: dict[str, str], after: dict[str, str]) -> str:
@@ -183,7 +226,7 @@ def enforce(run, phase, agent: AgentConfig, before: dict[str, str]) -> list[str]
     outcomes = {p: _roll_back(run, p, before, after) for p in breaches}
     scope = ("read-only" if agent.writes == []
              else f"limited to {agent.writes}" if agent.writes
-             else f"barred from {[*run.cfg.defaults.protected_files, *skills.protected(run.cfg)]}")
+             else f"barred from {protected(run.cfg)}")
     detail = "\n".join(f"  - {p} — {outcome}" for p, outcome in outcomes.items())
     raise PermissionBreach(
         f"{agent.name} is {scope} but modified {len(breaches)} path(s):\n{detail}")

@@ -151,11 +151,9 @@ defaults:
   coding_agent: pi                 # pi | claude_code — mixable per agent
   model: google/gemini-3.6-flash   # provider/model-id, a bare id can match several providers
   thinking: medium                 # off | minimal | low | medium | high | xhigh | max
-  protected_files:                 # no agent may edit the machinery that grades it
-    - adws/adw_modules/
-    - adws/adw_sssf_config/
-    - adws/adw_*.py
-    - .github/                     # and CI, which grades the PR
+  protected_files: []              # additions only: the factory's code, .github/, the
+                                   # prompts and skills are always protected — no agent
+                                   # may edit the machinery that grades it
   data_dir: adws/adw_data
 
 agents:

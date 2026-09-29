@@ -346,14 +346,10 @@ class ConfigDefaults(BaseModel):
     skills: list[str] = Field(default_factory=list)   # inherited by agents without their own
     tools: Optional[list[str]] = None    # roster-wide allowlist; None = all tools usable
     idle_timeout_seconds: int = 600      # per-agent overridable; 0 = never kill
-    # Off-limits to every agent that has not named them in its own `writes`.
-    # The factory's own code is the default: an agent must not be able to edit
-    # the machinery that decides whether its work passed. Nor the repo's CI,
-    # which grades the PR and runs a pushed branch's workflows with the repo's
-    # secrets before anyone has reviewed them.
-    protected_files: list[str] = Field(default_factory=lambda: [
-        "adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py", ".github/",
-    ])
+    # Off-limits to every agent that has not named them in its own `writes`,
+    # ON TOP OF permissions.BUILTIN_PROTECTED: a roster lists only its own
+    # additions, so a protection sssf adds later reaches it on update.
+    protected_files: list[str] = Field(default_factory=list)
     data_dir: str = "adws/adw_data"
 
 

@@ -230,7 +230,7 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
                                      type="error", name="permission_breach",
                                      payload={"agent": agent.name, "error": str(breach),
                                               "writes": agent.writes,
-                                              "protected_files": run.cfg.defaults.protected_files}))
+                                              "protected_files": permissions.protected(run.cfg)}))
         raise
     if touched:
         run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,

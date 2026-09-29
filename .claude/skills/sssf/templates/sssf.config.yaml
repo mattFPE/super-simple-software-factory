@@ -26,20 +26,19 @@ defaults:
     - ls                           # list directories       (pi default: OFF)
   # Off-limits to every agent that does not name them in its own `writes`.
   # `tools` alone cannot protect these: bash runs `git checkout`, and write
-  # reaches any path. An agent must not be able to edit the machinery that
-  # decides whether its own work passed. Nor the repo's CI: it grades the PR, and a
-  # pushed branch's workflows run with the repo's secrets before anyone reviews them.
-  # Enforced in adw_modules/permissions.py.
+  # reaches any path. Always protected, whatever this list says: the factory's
+  # code (adws/adw_modules/, adws/adw_sssf_config/, adws/adw_*.py), the repo's
+  # CI (.github/), everything under data_dir except sessions/ (prompts, harness
+  # extensions, skills), and every skill named below. An agent must not be able
+  # to edit what decides whether its work passed. List only your ADDITIONS here.
+  # Only a `writes` entry inside a protected area unlocks it: `.github/workflows/`
+  # does, a broad `**/*.md` does not. Enforced in adw_modules/permissions.py.
   #
   # `writes:` per agent says what it may change IN THE REPO. It never restricts
-  # the session runtime under data_dir — context_handoff/, envelopes, prompts,
-  # raw output. Every agent can always write its own report; `writes: []` means
-  # read-only with respect to the repo, not mute.
-  protected_files:
-    - adws/adw_modules/
-    - adws/adw_sssf_config/
-    - adws/adw_*.py
-    - .github/
+  # the session runtime under data_dir/sessions/ — context_handoff/, envelopes,
+  # prompts sent, raw output. Every agent can always write its own report;
+  # `writes: []` means read-only with respect to the repo, not mute.
+  protected_files: []              # e.g. [migrations/, infra/]
   data_dir: adws/adw_data          # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
 
 observability:

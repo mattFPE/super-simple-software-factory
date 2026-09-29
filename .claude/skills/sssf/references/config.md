@@ -51,7 +51,7 @@ agents:
 | `skills` | list[path] | Roster-wide [skills](#skills). Every agent that omits its own `skills` inherits this. Default `[]`. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
 | `idle_timeout_seconds` | int | Seconds with no output from an agent before its whole process tree is killed and the phase fails. Default `600`; `0` never kills. Per-agent overridable. |
-| `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`, `.github/` — an agent must not be able to edit the machinery that decides whether its work passed, and that includes CI: a pushed branch's workflows run with the repo's secrets before anyone reviews the PR. Every skill the roster names inside the repo is protected too, whether it is listed here or not. |
+| `protected_files` | list[string] | **Additional** paths no agent may modify unless it names them in its own `writes`. These are always protected, whatever the list says: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`, `.github/`, everything under `data_dir` except `sessions/`, and every skill the roster names inside the repo. An agent must not be able to edit what decides whether its work passed. That covers CI, since a pushed branch's workflows run with the repo's secrets before anyone reviews the PR, and it covers the prompts and skills other agents are told. The list only adds, so protections sssf adds later reach your roster on update. Default `[]`. |
 | `data_dir` | path | Runtime home. Sessions land at `{data_dir}/sessions/{adw_id}/{agent_name}/`. Default `adws/adw_data`. |
 
 ### `observability`
@@ -109,7 +109,7 @@ The PR stays open either way. A run that fails its checks has already removed it
 | `color` | no | Hex swatch (`"#a78bfa"`) for this agent's lane in the visualizer. Travels config → `agent_sessions.color` → `/api/sessions/:adw_id`, and rides the `agent_start` event so a lane is colored while the agent is still running. Unset = the UI's fallback palette. |
 | `coding_agent`, `model`, `thinking`, `color`, `harness_engineering`, `skills`, `idle_timeout_seconds` | no | Override the corresponding `defaults` key. An agent's own `skills` replaces the default list; it doesn't add to it. |
 | `tools` | no | Allowlist. **Omitting the key means all tools usable.** A capability list, not a boundary — see `writes`. |
-| `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. Naming a `protected_files` path here is what unlocks it. **The session runtime under `data_dir` is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
+| `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. An entry inside a protected area unlocks the part of it the entry matches: `.github/workflows/` unlocks CI's workflows, but a broad `**/*.md` unlocks no prompt or `SKILL.md`. **The session runtime, `data_dir/sessions/`, is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
 
 ### Claude Code agents
 
@@ -212,10 +212,10 @@ redo; a write has already happened, so re-prompting fixes nothing. Instead:
 
 ```yaml
 defaults:
-  protected_files: [adws/adw_modules/, adws/adw_sssf_config/, "adws/adw_*.py", .github/]
+  protected_files: [infra/]   # added to the built-ins, never instead of them
 
 agents:
-  - name: builder      # no `writes` key -> unrestricted, minus protected_files
+  - name: builder      # no `writes` key -> unrestricted, minus everything protected
   - name: scout
     writes: []         # no repo writes; its findings still land in context_handoff/
   - name: planner
@@ -224,7 +224,19 @@ agents:
     writes: [app_docs/, docs/, "**/*.md", "*.md"]
 ```
 
-**The session runtime under `data_dir` is always writable, for every agent.**
+**Protected, whatever `protected_files` says:** the factory's code
+(`adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`), `.github/`,
+everything under `data_dir` except `sessions/` (the prompts, harness extensions
+and skills other agents are told), and every skill the roster names in the repo.
+`protected_files` adds to that list.
+
+**Only an entry that names a protected area unlocks it.** A `writes` entry must
+lie inside the area, like `.github/workflows/` for `.github/`, and it unlocks
+only the paths it matches. A broad glob that merely matches doesn't count. That
+is why the documenter's `**/*.md` above reaches `README.md` and `docs/` but not
+`adws/adw_data/prompt_engineering/reviewer/system.md`, which is markdown too.
+
+**The session runtime, `data_dir/sessions/`, is always writable, for every agent.**
 `context_handoff/` is how agents hand work to each other, and each agent's
 prompts, `raw_output.jsonl`, and `envelope.json` sit beside it. That grant comes
 from `data_dir` rather than from `.gitignore`: the runtime is normally ignored,
@@ -272,7 +284,7 @@ An entry is a skill directory (holding `SKILL.md`), a `SKILL.md` file, or a dire
 
 Skills are offered the same way on both coding agents, the way pi offers its own. Each skill's name, description and `SKILL.md` path go into the system prompt, and the agent reads a skill's instructions only when its task matches. The system prompt says that where a skill disagrees with the agent's own instructions (what to produce, which files it may change, the shape of its report), the agent's own instructions win. The block lands in the saved `prompts/system.md`, and the `agent_start` event records the skill names, so the trace shows what each agent was offered.
 
-**Keep skills in the repo**, under `adws/adw_data/skills/`. Then every machine offers the same ones, in the version you committed. A skill inside the repo is also protected like `protected_files`, because skills are read when needed, not when the run starts: a builder that edited one would rewrite what the reviewer reads next. An agent that names the path in its own `writes` may edit it. A skill outside the repo, such as a plugin cache, works but can't be protected. To bring in an installed plugin's skills, copy them in:
+**Keep skills in the repo**, under `adws/adw_data/skills/`. Then every machine offers the same ones, in the version you committed. A skill inside the repo is also protected, because skills are read when needed, not when the run starts: a builder that edited one would rewrite what the reviewer reads next. An agent whose `writes` names a path inside the skill's directory may edit it. A skill outside the repo, such as a plugin cache, works but can't be protected. To bring in an installed plugin's skills, copy them in:
 
 ```bash
 cp -r ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<skill> adws/adw_data/skills/
