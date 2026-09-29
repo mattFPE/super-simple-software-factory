@@ -27,6 +27,7 @@ adws/
 │   ├── gates.py                 gate(envelope, run) -> GateReport — one check per item verified
 │   ├── changes.py               git diff vs a resolved base → ChangeSet → envelope for the documenter
 │   ├── worktree.py              a committing run's own worktree + branch sssf/<adw_id>; lands as branch/merge/PR
+│   ├── ci.py                    with pr.wait_for_checks: wait for the PR's CI, and take its verdict
 │   ├── issues.py                a GitHub issue as the request: trust + readiness checks, claim, outcome comment
 │   ├── quality.py, procs.py     known commands from config · agent idle watchdog + process-tree kill
 │   ├── prompts.py, session.py, tracer.py, console.py, git_helper.py, utils.py

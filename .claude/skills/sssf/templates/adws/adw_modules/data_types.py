@@ -343,9 +343,11 @@ class ConfigDefaults(BaseModel):
     idle_timeout_seconds: int = 600      # per-agent overridable; 0 = never kill
     # Off-limits to every agent that has not named them in its own `writes`.
     # The factory's own code is the default: an agent must not be able to edit
-    # the machinery that decides whether its work passed.
+    # the machinery that decides whether its work passed. Nor the repo's CI,
+    # which grades the PR and runs a pushed branch's workflows with the repo's
+    # secrets before anyone has reviewed them.
     protected_files: list[str] = Field(default_factory=lambda: [
-        "adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py",
+        "adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py", ".github/",
     ])
     data_dir: str = "adws/adw_data"
 
@@ -377,6 +379,14 @@ class WorktreeConfig(BaseModel):
     # `copy:` in the YAML; not the attribute name, which would shadow BaseModel.copy
     copy_files: list[str] = Field(default_factory=list, alias="copy")   # e.g. [.env]
     setup: list[list[str]] = Field(default_factory=list)   # e.g. [[bun, install]]
+
+
+class PRConfig(BaseModel):
+    """What a `--pr` run does after opening its PR (see ci.py)."""
+    # Wait for the PR's CI checks and take their verdict as the run's: a red
+    # check fails the run. Off, the run is done once the PR is open.
+    wait_for_checks: bool = False
+    checks_timeout_seconds: int = 1800
 
 
 class IssueLink(BaseModel):
@@ -434,6 +444,7 @@ class SSSFConfig(BaseModel):
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
+    pr: PRConfig = Field(default_factory=PRConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
 
 

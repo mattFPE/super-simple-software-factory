@@ -49,7 +49,7 @@ agents:
 | `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension files (`-e`). Claude Code: plugin directories (`--plugin-dir`); a `.ts` pi extension fails validation. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
 | `idle_timeout_seconds` | int | Seconds with no output from an agent before its whole process tree is killed and the phase fails. Default `600`; `0` never kills. Per-agent overridable. |
-| `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py` — an agent must not be able to edit the machinery that decides whether its work passed. |
+| `protected_files` | list[string] | Paths **no** agent may modify unless it names them in its own `writes`. Default: `adws/adw_modules/`, `adws/adw_sssf_config/`, `adws/adw_*.py`, `.github/` — an agent must not be able to edit the machinery that decides whether its work passed, and that includes CI: a pushed branch's workflows run with the repo's secrets before anyone reviews the PR. |
 | `data_dir` | path | Runtime home. Sessions land at `{data_dir}/sessions/{adw_id}/{agent_name}/`. Default `adws/adw_data`. |
 
 ### `observability`
@@ -84,6 +84,17 @@ Committing ADWs run in their own git worktree: a clean checkout of HEAD on branc
 | `setup` | list[argv] | Commands run in the worktree, in order, after `copy`, e.g. `[[bun, install]]`. A failure fails the `worktree` phase and keeps the worktree. Both run again when a failed run's worktree is reused, so keep them repeatable. |
 
 The CLI decides how a run ends: the branch stays (default), `--merge` merges it into the branch you started from, `--pr` pushes it and opens a PR with `gh`. `--in-place` skips the worktree entirely. `just worktrees` lists them, `just worktree-rm <adw_id>` removes one (its branch stays).
+
+### `pr`
+
+What a `--pr` run does after opening its PR. Off by default: the run is done once the PR is open, and CI reports on it later, after the run has already said ✅.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `wait_for_checks` | bool | Wait for the PR's CI checks in a `checks` phase and take their verdict as the run's. A failed or cancelled check fails the run, and the issue comment lists the failed checks. Checks that never appear within 2 minutes mean the repo has no CI on PRs, so the phase passes and says so. Default `false`. |
+| `checks_timeout_seconds` | int | How long to wait. Checks still running after this fail the run. Default `1800`. |
+
+The PR stays open either way. A run that fails its checks has already removed its worktree, so fix the PR by hand, or close it and start a fresh run with `--force`.
 
 ### `agents[]`
 
@@ -199,7 +210,7 @@ redo; a write has already happened, so re-prompting fixes nothing. Instead:
 
 ```yaml
 defaults:
-  protected_files: [adws/adw_modules/, adws/adw_sssf_config/, "adws/adw_*.py"]
+  protected_files: [adws/adw_modules/, adws/adw_sssf_config/, "adws/adw_*.py", .github/]
 
 agents:
   - name: builder      # no `writes` key -> unrestricted, minus protected_files

@@ -25,7 +25,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import git_helper
+from . import ci, git_helper
 from .data_types import PhaseParams, RunOptions
 from .utils import operator_env
 
@@ -231,6 +231,7 @@ def enter(run, opts: RunOptions) -> None:
 
 def land(run, opts: RunOptions) -> None:
     """The `land` phase: end the run as a branch, a merge or a PR; drop the worktree.
+    A PR is then followed by the `checks` phase when `pr.wait_for_checks` is on.
 
     Call after the last commit phase. In place it does nothing — the commits are
     already on your branch.
@@ -248,3 +249,4 @@ def land(run, opts: RunOptions) -> None:
             # Only now: git refuses to delete a branch a worktree has checked out.
             git_helper._git("branch", "-d", run.worktree["branch"], repo=run.main_root)
         ph.log(**outcome)
+    ci.wait(run)

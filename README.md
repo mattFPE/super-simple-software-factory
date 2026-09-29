@@ -155,6 +155,7 @@ defaults:
     - adws/adw_modules/
     - adws/adw_sssf_config/
     - adws/adw_*.py
+    - .github/                     # and CI, which grades the PR
   data_dir: adws/adw_data
 
 agents:
@@ -387,6 +388,7 @@ Honest edges, because knowing them is cheaper than discovering them.
 | A run dies without closing its trace | A hard kill (every kill on Windows), a crash or a reboot leaves the session reading `running`. The next run's startup sweeps any `running` session whose process is gone and closes it as `fail` with an `abandoned` event | Nothing. It is reported on the console when it happens |
 | Model names differ between machines | The same model is `openai-codex/…` under a ChatGPT login and `openai/…` under an API key, and a bare pattern like `gemini-3.6-flash` matches several providers, so `agents.validate()` refuses | Write `provider/model-id`, or a list of candidates in preference order: `model: [openai-codex/gpt-5.6-terra, openai/gpt-5.6-terra]`. The first that resolves on this machine wins |
 | The output contract drifts | Every envelope field has a default, so drift never fails parsing. It fails silently, with dropped keys and fields that always arrive empty. Before the first send, each call compares its `## Report` example against its `output_type`, both ways, and fails on disagreement at zero token cost | Fix the triad the error names: type, `## Report` example, `output_type=` |
+| CI goes red after the run said ✅ | Gates and `quality` judge the run on your machine. A PR's CI judges it later, often on more, and by default the run doesn't wait | Set `pr: {wait_for_checks: true}` and a `--pr` run waits for the checks and fails on a red one. Agents can't edit `.github/` unless one names it in `writes`, because a pushed branch's workflows run with your repo's secrets |
 | Gates pass, output is bad | Gates check what a predicate can check, not plan quality or code taste | Run the `reviewer`, or read it yourself |
 | An agent edits something it should not | Detected and rolled back after the call, and the phase fails | Expected. Widen that agent's `writes` if the change was legitimate |
 | A build changes nothing | `commit_all` raises when there is nothing to commit, so a no-op build fails the phase rather than committing nothing | Expected. Read the builder's envelope for why |

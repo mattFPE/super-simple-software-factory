@@ -308,7 +308,13 @@ def _outcome(run, opts: RunOptions, ok: bool) -> str:
     elif run.landed.get("branch"):
         lines.append(f"Branch: `{run.landed['branch']}`")
     lines += run.report.values()
-    if not ok:
+    if not ok and run.landed.get("pr"):
+        # Failed after landing (its CI went red): the worktree is gone and the
+        # open PR makes require_runnable refuse a plain rerun.
+        lines.append(f"`{opts.issue.ready_label}` is still on the issue. Fix the pull request, "
+                     "or close it and start a fresh run:\n"
+                     f"`uv run adws/{adw}.py \"#{opts.issue.number}\" --force`")
+    elif not ok:
         kept = " Its worktree is kept, and rerunning picks it back up:" if run.worktree else ""
         lines.append(f"`{opts.issue.ready_label}` is still on the issue.{kept}\n"
                      f"`uv run adws/{adw}.py \"#{opts.issue.number}\" --adw-id {run.adw_id}`")
