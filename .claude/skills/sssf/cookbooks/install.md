@@ -23,18 +23,51 @@ Run from the **target repo root** — the cwd is where everything lands. If the 
 | `adws/adw_data/prompt_engineering/{planner,builder,scout,reviewer,documenter}/` | `templates/prompt_engineering/` | yes — **the user-owned home for prompts** |
 | `adws/adw_data/harness_engineering/` | `templates/harness_engineering/` | yes — **the user-owned home for pi extensions** |
 | `justfile` | `templates/justfile` | yes — starter recipes: `just demo`, the workflows, the trace reads, `just obs` |
-| `adws/.sssf_stamp.json` | written by `install.py` | yes — a hash of every stamped file, so `--force` can tell your edits from its own files |
+| `adws/.sssf_stamp.json` | written by `install.py` | yes — a hash of every stamped file and where sssf came from, so an update can tell your edits from its own files and knows where to update from |
 | `adws/adw_data/sessions/`, `adws/adw_data/sssf.db` | created at runtime | no — gitignored |
 
 The two `*_engineering` dirs mirror the two config keys of the same name: `prompt_engineering` is what an agent is told, `harness_engineering` is what its harness can do. Both are yours the moment they are stamped. Edit them in `adws/adw_data/`, never back inside the skill.
 
 `harness_engineering/` ships with `subagents.ts` — the pi extension backing `subagent_create` / `_continue` / `_list` / `_remove`, wired to the planner and scout in the starter roster.
 
-## Idempotency
+## Updating an installed repo
 
-Re-running is safe. `install.py` skips **every** file that already exists — your config, your prompts, and previously stamped code alike — and reports what it skipped, so a second run doubles as a drift check.
+```bash
+just sssf-update                                  # from where this repo's sssf came from
+just sssf-update --source <sssf repo path | git URL> [--ref <branch|tag|sha>]
+```
 
-To refresh to the skill's current version, run with `--force`. It replaces only files that are **still exactly what it stamped** (per `adws/.sssf_stamp.json`, line endings normalized). Any file you edited, whether config, prompts, an ADW or a module, is kept and listed for you to merge by hand against `templates/`. A repo installed before the manifest existed has no record, so every file that differs from its template counts as edited. `--force-all` overwrites everything, your edits included. Commit before using it.
+Start from a clean tree, then review the result with `git diff` and commit it, `adws/.sssf_stamp.json` included. What happens to each stamped file:
+
+| File | Unedited | Edited by you |
+|---|---|---|
+| sssf's code: `adws/adw_modules/`, the starter `adws/adw_*.py` | replaced | **stops the update before anything is written**, because modules half at one version and half at another break. Move your change into your own module or ADW, or pass `--overwrite-edited` (git keeps your version) |
+| yours: the config, prompts, harness extensions, `justfile`, `.env.sample` | replaced | kept, and listed with the `git diff` to merge by hand if you want the new version |
+| new in this version | added | |
+| stamped once, since deleted by you | not restored, and listed | |
+
+"Unedited" means a file matches what the stamp recorded, **or any version its template has had in sssf's git history**. So a repo installed before the stamp existed updates too, without `--force-all`.
+
+Your config rarely needs merging. Defaults live in code, so a key the config doesn't set takes the new version's default, and the update lists keys that are new in this version. `protected_files` only adds to the built-in protections, so new ones reach your roster without an edit. A `justfile` you edited gets the `sssf-update` recipe appended if it lacks one. After updating, every ADW is loaded with `--help` (no agent runs), so a broken update shows up then, not partway through a run.
+
+**Where it updates from.** Every install and update records its source in the stamp: the skill's path, and when it sits in a git repo, that repo's URL and commit. `just sssf-update` runs `adws/adw_modules/sssf_update.py`, which uses, in order:
+1. `--source`
+2. the recorded path, if it exists on this machine
+3. the recorded git URL, cloned into `~/.cache/sssf/` (`SSSF_CACHE` overrides) and fetched on later runs
+
+Whichever it finds, it runs that version's own `install.py --update`, so the update logic is always the newer one's.
+
+**A copy of the skill inside the repo** (`.claude/skills/sssf`, as the README's quick start makes) can't update itself. It is only as new as the copy, and the update says so. Name the real source once with `--source`. From then on it is recorded, and each update also refreshes the in-repo copy, so `/sssf`, the cookbooks and `just obs` match the code. Build output and installed packages (`dist/`, `node_modules/`) are left alone.
+
+**The first update** of a repo stamped before `just sssf-update` existed has no recipe yet. Run the newer installer directly, once, from the repo root:
+
+```bash
+uv run <path to the sssf repo>/.claude/skills/sssf/scripts/install.py --update
+```
+
+## Re-running the installer
+
+Re-running `install.py` without a flag is safe. It skips **every** file that already exists and reports what it skipped, so a second run doubles as a drift check. `--force` refreshes only files still exactly as stamped, and `--force-all` overwrites everything, your edits included. Both predate `--update`, which is the way to take a newer version.
 
 ## Post-install checklist
 

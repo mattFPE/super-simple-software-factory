@@ -101,6 +101,16 @@ worktrees:
 worktree-rm ADW_ID:
     git worktree remove --force '{{parent_directory(justfile_directory())}}/{{file_name(justfile_directory())}}.sssf-worktrees/{{ADW_ID}}'
 
+# ── sssf itself ─────────────────────────────────────────────────────────────
+# Takes a newer sssf from where this repo's came from (adws/.sssf_stamp.json):
+# the recorded path, else its git URL. sssf's code is replaced where you have
+# not edited it, and an edit stops the update before anything is written. Your
+# config, prompts and edits are kept. Start clean; review with `git diff`.
+
+# update sssf's code from where it was installed: just sssf-update [--source <path|git url>]
+sssf-update *ARGS:
+    uv run adws/adw_modules/sssf_update.py "$@"
+
 # ── observability UI ────────────────────────────────────────────────────────
 
 # Needs bun. The UI is built into dist/ and ONE server process serves it. It

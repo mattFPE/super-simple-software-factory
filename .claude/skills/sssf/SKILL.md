@@ -47,6 +47,7 @@ You run the system, observe the system, and help the user interact with it. **Yo
 | Request | Cookbook |
 |---|---|
 | `/sssf install`, set up the factory in this repo | [cookbooks/install.md](cookbooks/install.md) |
+| update sssf in a repo, take a newer version | [cookbooks/install.md](cookbooks/install.md#updating-an-installed-repo): `just sssf-update` |
 | create a new ADW / workflow | [cookbooks/create_adw.md](cookbooks/create_adw.md) |
 | modify an existing ADW chain | [cookbooks/update_adw.md](cookbooks/update_adw.md) |
 | create the config / agent roster | [cookbooks/create_config.md](cookbooks/create_config.md) |

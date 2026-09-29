@@ -80,7 +80,7 @@ just obs                   # the trace UI in the background, needs bun (just obs
 uv run adws/adw_prompt.py "reply with a one-line summary of this repo" --agent scout
 ```
 
-Re-running `install.py` is safe. It skips every file that already exists and reports what it skipped, so a second run doubles as a drift check. `--force` refreshes stamped files to the skill's current version, but only the ones you have not modified since they were stamped (hashes in `adws/.sssf_stamp.json`, which you commit). Files you edited are kept and listed. `--force-all` overwrites everything.
+To take a newer sssf later, run `just sssf-update` from a clean tree and review `git diff`. It replaces sssf's own code where you haven't edited it, and stops before writing anything if you have. It keeps your config, prompts and edits, and adds what is new. It knows where to update from because `adws/.sssf_stamp.json`, which you commit, records the source. A copy of the skill in the repo, like the one step 1 makes, can't update itself, so name the real source once: `just sssf-update --source /path/to/super-simple-software-factory` (or its git URL). See `cookbooks/install.md`.
 
 Green on the smoke test means the whole path works: config validated, session minted, Pi ran, envelope parsed, events landed in `adws/adw_data/sssf.db`. Fix it there before composing anything larger, because every multi-agent chain rides this exact path.
 
@@ -391,7 +391,7 @@ Honest edges, because knowing them is cheaper than discovering them.
 | Gates pass, output is bad | Gates check what a predicate can check, not plan quality or code taste | Run the `reviewer`, or read it yourself |
 | An agent edits something it should not | Detected and rolled back after the call, and the phase fails | Expected. Widen that agent's `writes` if the change was legitimate |
 | A build changes nothing | `commit_all` raises when there is nothing to commit, so a no-op build fails the phase rather than committing nothing | Expected. Read the builder's envelope for why |
-| Refreshing stamped code | `install.py` records a hash of every file it writes in `adws/.sssf_stamp.json`. `--force` refreshes only files you have not modified since they were stamped, and lists the ones it kept | Merge kept files by hand against the skill's `templates/`, or `--force-all` to overwrite everything, your edits included |
+| Taking a newer sssf | `just sssf-update` replaces sssf's code where it is unedited, meaning it matches the stamp or any version sssf ever shipped. An edit to sssf's code stops it before anything is written, and your config, prompts and other edits are kept and listed. New config keys take their defaults from code | Start clean, review `git diff`, commit. Move changes to sssf's code into your own module, or pass `--overwrite-edited`. Merge kept files by hand if you want the new version |
 | `just` is not installed | The stamped `justfile` is a convenience wrapper, nothing depends on it. On Windows it needs only `git` on PATH, recipes run through Git's bundled `sh` | Every recipe is a one-line `uv run` or `sqlite3` command. Open the justfile and run the line yourself |
 
 Also missing on purpose, so you know what to add: a sandbox around the agent. A worktree isolates a run by working directory, not by permission, so an agent that `cd`s into your checkout can still write there. The factory deliberately does not police your checkout, because you may be editing it while the run works.
