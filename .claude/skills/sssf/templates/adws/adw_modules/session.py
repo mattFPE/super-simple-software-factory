@@ -7,7 +7,9 @@ minted and printed so the next ADW can pick it up.
 
 from __future__ import annotations
 
+import argparse
 import atexit
+import json
 import os
 import signal
 import sys
@@ -68,8 +70,59 @@ def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def add_cli_args(parser, commits: bool = False) -> None:
-    """The flags every ADW shares; `commits=True` adds the worktree/landing ones."""
+class _Describe(argparse.Action):
+    """`--describe`: print the ADW's command line as JSON and exit, starting nothing.
+
+    It runs while argv is parsed, like `--help`, so the ADW's own code — config,
+    session, worktree, agents — is never reached, and the prompt isn't required.
+    """
+
+    def __init__(self, option_strings, dest, commits: bool, resumes: bool, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, **kwargs)
+        self.commits, self.resumes = commits, resumes
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # stdout, not run.console: no Run exists yet, and the Console parses this as JSON.
+        print(json.dumps(describe(parser, self.commits, self.resumes), indent=2, default=str))
+        parser.exit()
+
+
+def _flag(action) -> str | None:
+    """The option's long spelling (`--adw-id`); None for a positional."""
+    strings = action.option_strings
+    return next((s for s in strings if s.startswith("--")), strings[0] if strings else None)
+
+
+def describe(parser, commits: bool, resumes: bool) -> dict:
+    """The options `parser` accepts, read from the parser itself so it can't drift."""
+    shown = [a for a in parser._actions
+             if not isinstance(a, (argparse._HelpAction, _Describe))
+             and a.help is not argparse.SUPPRESS]               # hidden on purpose
+    return {
+        "commits": commits,
+        "resumes": resumes,
+        "options": [{
+            "name": a.dest,
+            "flag": _flag(a),
+            "kind": "flag" if a.nargs == 0 else "choice" if a.choices else "value",
+            "help": a.help,
+            "default": a.default,
+            "choices": list(a.choices) if a.choices else None,
+            "required": a.required,
+        } for a in shown],
+        "mutually_exclusive": [[_flag(a) for a in group._group_actions]
+                               for group in parser._mutually_exclusive_groups],
+    }
+
+
+def add_cli_args(parser, commits: bool = False, resumes: bool = False) -> None:
+    """The flags every ADW shares; `commits=True` adds the worktree/landing ones.
+
+    `resumes=True` marks a Resuming ADW: one that continues an earlier Run's work
+    under its `--adw-id`. Both are reported by `--describe`, which every ADW gets.
+    """
+    parser.add_argument("--describe", action=_Describe, commits=commits, resumes=resumes,
+                        help="print this ADW's options as JSON and exit")
     parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
     parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
     if not commits:
