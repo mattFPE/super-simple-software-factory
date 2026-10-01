@@ -128,6 +128,14 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def _message(event: dict) -> dict:
+    """The assistant/user message envelope. Other events can carry `message`
+    as a plain string (a `permission_denied` system event does), so anything
+    that isn't an object reads as no message at all."""
+    message = event.get("message")
+    return message if isinstance(message, dict) else {}
+
+
 def _text_of(content) -> str:
     """Claude Code content is a string or a list of blocks."""
     if isinstance(content, str):
@@ -151,7 +159,7 @@ class ToolCallTracker:
     def observe(self, event: dict) -> Optional[dict]:
         """Returns the record for a finished tool call, else None."""
         etype = event.get("type")
-        content = (event.get("message") or {}).get("content")
+        content = _message(event).get("content")
         if etype not in ("assistant", "user") or not isinstance(content, list):
             return None
         if etype == "assistant":
@@ -309,8 +317,8 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                         state = {"model_usage": {}}
                         state_path.write_text(json.dumps(state), encoding="utf-8")
                 elif etype == "assistant" and not event.get("parent_tool_use_id"):
-                    last_turn = (event.get("message") or {}).get("usage") or last_turn
-                    text = _text_of((event.get("message") or {}).get("content"))
+                    last_turn = _message(event).get("usage") or last_turn
+                    text = _text_of(_message(event).get("content"))
                     if text:
                         result.text = text   # superseded by `result`, kept if none comes
                 elif etype == "result":
