@@ -98,6 +98,37 @@ def commit_all(message: str, repo: Repo = None) -> str:
     return _git("rev-parse", "--short", "HEAD", repo=repo)
 
 
+def commit_paths(message: str, paths: list[str], repo: Repo = None) -> str | None:
+    """Commit only `paths`, leaving the rest of the tree exactly as it is.
+
+    For a phase whose work product is a few named files in a tree that may hold
+    someone else's uncommitted work — a joined run's plan commit, with a crashed
+    build's changes still in the worktree. Paths outside the repo (a report in
+    the session folder) are skipped. Returns the short sha, or None when the
+    paths hold no change: a rerun that wrote the same spec has nothing to add.
+    """
+    if not is_repo(repo):
+        raise RuntimeError("not a git repository — a commit phase needs one.")
+    root = repo_root(repo)
+    inside = []
+    for declared in paths:
+        path = Path(declared) if Path(declared).is_absolute() else root / declared
+        try:
+            relative = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if path.exists():
+            inside.append(relative)
+    if not inside:
+        return None
+    _git("add", "-A", "--", *inside, repo=repo)
+    if _ok("diff", "--cached", "--quiet", "--", *inside, repo=repo):
+        return None
+    # A pathspec makes this `--only`: whatever else is staged stays staged, uncommitted.
+    _git("commit", "-m", message, "--", *inside, repo=repo)
+    return _git("rev-parse", "--short", "HEAD", repo=repo)
+
+
 def changed_files(repo: Repo = None) -> list[str]:
     out = _git("status", "--porcelain", repo=repo)
     return [line[3:] for line in out.splitlines() if line]
