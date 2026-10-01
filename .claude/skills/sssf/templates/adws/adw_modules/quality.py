@@ -97,6 +97,8 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=spec.timeout_seconds,
         )
         returncode = completed.returncode
@@ -115,7 +117,8 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
     duration = time.monotonic() - clock
     output_artifact.write_text(
         f"$ {command}\nexit: {returncode}\nduration_seconds: {duration:.3f}\n"
-        f"\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n"
+        f"\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
+        encoding="utf-8",
     )
     passed = returncode == 0
     run.tracer.event(EventRecord(

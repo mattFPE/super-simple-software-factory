@@ -235,7 +235,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     session_dir = Path(request.session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
     state_path = session_dir / f"{claude_uuid}.json"
-    state = json.loads(state_path.read_text()) if state_path.is_file() else None
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else None
 
     # The system prompt goes by file: Windows caps a command line at 32K chars.
     system_path = session_dir / f"{claude_uuid}.system.md"
@@ -307,7 +307,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                         # The session exists from here on: continue it next
                         # time, even if this run dies before its result.
                         state = {"model_usage": {}}
-                        state_path.write_text(json.dumps(state))
+                        state_path.write_text(json.dumps(state), encoding="utf-8")
                 elif etype == "assistant" and not event.get("parent_tool_use_id"):
                     last_turn = (event.get("message") or {}).get("usage") or last_turn
                     text = _text_of((event.get("message") or {}).get("content"))
@@ -326,7 +326,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
             result.text = final["result"]
         model_usage = final.get("modelUsage") or {}
         _bill(result, model_usage, (state or {}).get("model_usage", {}))
-        state_path.write_text(json.dumps({"model_usage": model_usage}))
+        state_path.write_text(json.dumps({"model_usage": model_usage}), encoding="utf-8")
         iterations = (final.get("usage") or {}).get("iterations") or []
         result.context_tokens = _occupancy(iterations[-1] if iterations else last_turn)
         result.context_window = int((model_usage.get(session_model) or {})

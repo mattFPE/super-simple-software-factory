@@ -98,7 +98,7 @@ def resolve_prompt(arg: str) -> str:
     try:
         p = Path(arg)
         if p.is_file():
-            return p.read_text()
+            return p.read_text(encoding="utf-8")
     except OSError:
         pass
     return arg
@@ -110,7 +110,7 @@ def engineer_name() -> str:
         return name
     try:
         out = subprocess.run(["git", "config", "user.name"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
     except OSError:

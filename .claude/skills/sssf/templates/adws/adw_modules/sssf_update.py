@@ -142,7 +142,7 @@ def _ok(clone: Path, ref: str) -> bool:
 
 
 def _run(argv: list[str]) -> None:
-    done = subprocess.run(argv, capture_output=True, text=True)
+    done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if done.returncode != 0:
         raise RuntimeError(f"{' '.join(argv)} failed: {done.stderr.strip()}")
 

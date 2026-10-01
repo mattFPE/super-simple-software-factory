@@ -67,9 +67,9 @@ def json_parses(envelope: EnvelopeBase, run) -> GateReport:
         if p.suffix != ".json" or not p.exists():
             continue
         try:
-            parsed = json.loads(p.read_text())
+            parsed = json.loads(p.read_text(encoding="utf-8"))
             report.check(a, True, f"parses, {type(parsed).__name__}")
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             report.check(a, False, f"declared JSON artifact does not parse: {e}")
     return report
 
@@ -218,6 +218,7 @@ def tests_pass(command: str):
     """Gate factory: the given shell command must exit 0."""
     def gate(envelope: EnvelopeBase, run) -> GateReport:
         result = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
                                 cwd=run.repo_root)   # the checkout the agent changed
         ok = result.returncode == 0
         note = f"exit {result.returncode}"

@@ -36,7 +36,7 @@ class GateFailure(RuntimeError):
 # ── config ───────────────────────────────────────────────────────────────────
 
 def load_config(path: str = "adws/adw_sssf_config/sssf.config.yaml") -> SSSFConfig:
-    raw = yaml.safe_load(Path(path).read_text()) or {}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     defaults = raw.get("defaults", {}) or {}
     for agent in raw.get("agents", []) or []:
         for key in ("coding_agent", "model", "thinking", "color", "tools", "writes",
@@ -383,4 +383,5 @@ def _persist_envelope(run, phase: Phase, agent_name: str, call: AgentCall,
         record = {"agent_name": agent_name, "purpose": resolve(run.cfg, agent_name).purpose,
                   "output_type": call.output_type.__name__, "attempt": attempt,
                   **envelope.model_dump()}
-        (run.session_dir / agent_name / "envelope.json").write_text(json.dumps(record, indent=2))
+        (run.session_dir / agent_name / "envelope.json").write_text(json.dumps(record, indent=2),
+                                                                    encoding="utf-8")

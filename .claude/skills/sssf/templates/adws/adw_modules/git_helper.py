@@ -26,7 +26,7 @@ def _git(*args: str, repo: Repo = None) -> str:
 def _ok(*args: str, repo: Repo = None) -> bool:
     """Run git as a yes/no question. Never raises."""
     return subprocess.run(["git", *args], capture_output=True, text=True,
-                          cwd=repo).returncode == 0
+                          encoding="utf-8", errors="replace", cwd=repo).returncode == 0
 
 
 def current_branch(repo: Repo = None) -> str:

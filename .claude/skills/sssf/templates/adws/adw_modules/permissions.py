@@ -52,7 +52,8 @@ class PermissionBreach(RuntimeError):
 
 
 def _git(args: list[str], cwd) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     return result.stdout if result.returncode == 0 else ""
 
 
@@ -203,7 +204,8 @@ def _roll_back(run, path: str, before: dict[str, str], after: dict[str, str]) ->
         except OSError as error:
             return f"could not delete ({error})"
     result = subprocess.run(["git", "checkout", "--", path],
-                            cwd=run.repo_root, capture_output=True, text=True)
+                            cwd=run.repo_root, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     return "rolled back" if result.returncode == 0 else "could not roll back"
 
 
