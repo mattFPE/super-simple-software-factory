@@ -100,7 +100,13 @@ def main(prompt: str, opts: RunOptions) -> int:
 
     with run.phase(PhaseParams(name="commit_plan", kind="code", owner="git",
                                description="Put the spec on record before any code exists to blur it")) as ph:
-        commit(ph, plan)
+        # Only the planner's own artifacts. A joined run's worktree can still
+        # hold a crashed build's changes, and those are the builder's to finish
+        # and commit_build's to land — swept in here, they would become the
+        # red check's baseline and pass as the spec (#5).
+        message = plan.commit_message or f"sssf({run.adw_id}): {plan.summary}"
+        sha = git_helper.commit_paths(message, plan.artifacts, run.repo_root)
+        ph.log(sha=sha or "unchanged — the spec is already on record", message=message)
 
     with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the plan exactly, test-first")) as ph:
