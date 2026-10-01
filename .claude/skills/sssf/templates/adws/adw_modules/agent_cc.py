@@ -44,6 +44,9 @@ from .data_types import PiRequest, PiResult
 from .utils import now_iso, operator_env
 
 CLAUDE_PATH = os.environ.get("CLAUDE_CODE_PATH", "claude")
+# A send with no `init` this long after launch is a stalled start: killed and
+# repeated once (see run). Never longer than the agent's idle_timeout_seconds.
+START_TIMEOUT_SECONDS = 90
 
 MODEL_ALIASES = ("fable", "opus", "sonnet", "haiku", "opusplan")
 
@@ -282,52 +285,71 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     # 32K ceiling, and a closed stdin is what keeps the child from waiting on
     # input that never arrives (see agent_pi). stderr goes to a file so a
     # chatty child cannot fill a pipe nobody is reading and deadlock the tail.
+    #
+    # Claude Code can stall before its session starts — seen on --resume, stuck
+    # in an operator's SessionStart hook with nothing after `hook_started` (#6).
+    # Until `init` arrives nothing has been sent, so a start that stalls past
+    # START_TIMEOUT_SECONDS is killed and the same send repeated, once, rather
+    # than sitting out the whole idle window and failing the phase.
+    start_seconds = min(START_TIMEOUT_SECONDS, request.idle_timeout_seconds)
     with stderr_path.open("a", encoding="utf-8") as stderr_file:
-        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=stderr_file, text=True, encoding="utf-8",
-                                   errors="replace", bufsize=1, cwd=request.cwd,
-                                   env=_child_env(), **procs.popen_kwargs())
-        if on_spawn:
-            on_spawn(process.pid)
-        assert process.stdin is not None and process.stdout is not None
-        try:
-            process.stdin.write(request.prompt)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass                             # it died early; stderr says why
-        with raw_path.open("a", encoding="utf-8") as raw,                 procs.supervise(process, request.idle_timeout_seconds,
-                                f"claude {model}") as watchdog:
-            for line in process.stdout:
-                watchdog.touch()
-                raw.write(line)
-                raw.flush()                  # events land on disk as they happen
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                etype = event.get("type")
-                if etype == "system" and event.get("subtype") == "init":
-                    session_model = event.get("model") or session_model
-                    if state is None:
-                        # The session exists from here on: continue it next
-                        # time, even if this run dies before its result.
-                        state = {"model_usage": {}}
-                        state_path.write_text(json.dumps(state), encoding="utf-8")
-                elif etype == "assistant" and not event.get("parent_tool_use_id"):
-                    last_turn = _message(event).get("usage") or last_turn
-                    text = _text_of(_message(event).get("content"))
-                    if text:
-                        result.text = text   # superseded by `result`, kept if none comes
-                elif etype == "result":
-                    final = event
-                if on_event:
-                    on_event(event)
-        result.returncode = process.wait()
-    if on_exit:
-        on_exit(process.pid)
+        for attempt in (1, 2):
+            process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=stderr_file, text=True, encoding="utf-8",
+                                       errors="replace", bufsize=1, cwd=request.cwd,
+                                       env=_child_env(), **procs.popen_kwargs())
+            if on_spawn:
+                on_spawn(process.pid)
+            assert process.stdin is not None and process.stdout is not None
+            try:
+                process.stdin.write(request.prompt)
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass                         # it died early; stderr says why
+            try:
+                with raw_path.open("a", encoding="utf-8") as raw,                         procs.supervise(process, request.idle_timeout_seconds,
+                                        f"claude {model}", start_seconds) as watchdog:
+                    for line in process.stdout:
+                        watchdog.touch()
+                        raw.write(line)
+                        raw.flush()          # events land on disk as they happen
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        etype = event.get("type")
+                        if etype == "system" and event.get("subtype") == "init":
+                            watchdog.started()
+                            session_model = event.get("model") or session_model
+                            if state is None:
+                                # The session exists from here on: continue it next
+                                # time, even if this run dies before its result.
+                                state = {"model_usage": {}}
+                                state_path.write_text(json.dumps(state), encoding="utf-8")
+                        elif etype == "assistant" and not event.get("parent_tool_use_id"):
+                            last_turn = _message(event).get("usage") or last_turn
+                            text = _text_of(_message(event).get("content"))
+                            if text:
+                                result.text = text   # superseded by `result`, kept if none comes
+                        elif etype == "result":
+                            final = event
+                        if on_event:
+                            on_event(event)
+                result.returncode = process.wait()
+            except procs.StalledStart as stall:
+                if attempt == 2:
+                    raise
+                stderr_file.write(f"[sssf] {stall} Repeating the send once.\n")
+                stderr_file.flush()
+                continue
+            finally:
+                process.stdout.close()
+                if on_exit:
+                    on_exit(process.pid)
+            break
 
     if final:
         if isinstance(final.get("result"), str):
