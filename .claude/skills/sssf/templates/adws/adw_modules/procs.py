@@ -42,24 +42,44 @@ def kill_tree(pid: int) -> None:
         pass
 
 
-class Watchdog:
-    """Kills a process tree after `idle_seconds` with no `touch()`. 0 disables."""
+class StalledStart(RuntimeError):
+    """The agent never got going: no sign of a started session within the
+    startup window. Nothing was sent yet, so the send is safe to repeat."""
 
-    def __init__(self, pid: int, idle_seconds: int):
+
+class Watchdog:
+    """Kills a process tree after `idle_seconds` with no `touch()`. 0 disables.
+
+    With `start_seconds`, it also kills the tree when `started()` has not been
+    called that long after launch — a child that prints a line or two and then
+    stalls before its session exists would otherwise sit out the whole idle
+    window (#6). `stalled` then says which of the two fired.
+    """
+
+    def __init__(self, pid: int, idle_seconds: int, start_seconds: int = 0):
         self.pid = pid
         self.idle_seconds = idle_seconds
+        self.start_seconds = start_seconds if idle_seconds > 0 else 0
         self.fired = False
-        self._last = time.monotonic()
+        self.stalled = False
+        self._launched = self._last = time.monotonic()
+        self._started = not self.start_seconds
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._watch, daemon=True)
 
     def touch(self) -> None:
         self._last = time.monotonic()
 
+    def started(self) -> None:
+        self._started = True
+
     def _watch(self) -> None:
-        while not self._stop.wait(min(5.0, max(0.5, self.idle_seconds / 10))):
-            if time.monotonic() - self._last > self.idle_seconds:
-                self.fired = True
+        shortest = min(t for t in (self.idle_seconds, self.start_seconds) if t > 0)
+        while not self._stop.wait(min(5.0, max(0.5, shortest / 10))):
+            now = time.monotonic()
+            stalled = not self._started and now - self._launched > self.start_seconds
+            if stalled or now - self._last > self.idle_seconds:
+                self.fired, self.stalled = True, stalled
                 kill_tree(self.pid)
                 return
 
@@ -73,7 +93,8 @@ class Watchdog:
 
 
 @contextmanager
-def supervise(process: subprocess.Popen, idle_seconds: int, label: str):
+def supervise(process: subprocess.Popen, idle_seconds: int, label: str,
+              start_seconds: int = 0):
     """Run the body (the output read loop) under an idle watchdog.
 
     Call `touch()` on the yielded watchdog for every line of output. On a clean
@@ -82,7 +103,7 @@ def supervise(process: subprocess.Popen, idle_seconds: int, label: str):
     no agent outlives its ADW. If the watchdog fired, raise a readable error
     instead of letting the empty result be mistaken for a bad response.
     """
-    dog = Watchdog(process.pid, idle_seconds).start()
+    dog = Watchdog(process.pid, idle_seconds, start_seconds).start()
     try:
         yield dog
     except BaseException:
@@ -90,6 +111,10 @@ def supervise(process: subprocess.Popen, idle_seconds: int, label: str):
         raise
     finally:
         dog.stop()
+    if dog.stalled:
+        process.wait()
+        raise StalledStart(f"{label} did not start a session within {dog.start_seconds}s "
+                           f"and was killed (process tree of pid {process.pid}).")
     if dog.fired:
         process.wait()
         raise RuntimeError(f"{label} produced no output for {idle_seconds}s and was killed "

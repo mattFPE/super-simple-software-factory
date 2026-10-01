@@ -15,12 +15,13 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "sssf"
 sys.path.insert(0, str(SKILL / "templates" / "adws"))
-from adw_modules import agent_cc  # noqa: E402
+from adw_modules import agent_cc, procs  # noqa: E402
 from adw_modules.data_types import PiRequest  # noqa: E402
 
 TOOL_USE_ID = "toolu_01UDETjJTY5AA2ze4AjjV18o"
@@ -46,15 +47,33 @@ BLOCKED_CALL = [
 ]
 
 
-def fake_claude(directory: Path, events: list[dict]) -> Path:
-    """An executable `claude` that drains stdin and prints `events` as stream-json."""
+def fake_claude(directory: Path, events: list[dict], stall_first: int = 0,
+                pause_after_init: float = 0) -> Path:
+    """An executable `claude` that drains stdin and prints `events` as stream-json.
+
+    Its first `stall_first` launches instead start a SessionStart hook and then
+    go silent for good — Claude Code stuck in its hook step on --resume (#6).
+    `pause_after_init` goes silent that long once the session has started, the
+    way an agent thinks. Every launch is counted in `launches` beside it.
+    """
     stream = directory / "stream.jsonl"
     stream.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
     script = directory / "fake_claude.py"
     script.write_text(
-        "import sys\n"
+        "import json, pathlib, sys, time\n"
+        f"count = pathlib.Path({str(directory / 'launches')!r})\n"
+        "n = int(count.read_text()) if count.exists() else 0\n"
+        "count.write_text(str(n + 1))\n"
         "sys.stdin.read()\n"
-        f"sys.stdout.write(open({str(stream)!r}, encoding='utf-8').read())\n",
+        f"if n < {stall_first}:\n"
+        "    print(json.dumps({'type': 'system', 'subtype': 'hook_started',\n"
+        "                      'hook_name': 'SessionStart:resume'}), flush=True)\n"
+        "    time.sleep(3600)\n"
+        f"lines = open({str(stream)!r}, encoding='utf-8').readlines()\n"
+        "sys.stdout.write(lines[0])\n"
+        "sys.stdout.flush()\n"
+        f"time.sleep({pause_after_init})\n"
+        "sys.stdout.write(''.join(lines[1:]))\n",
         encoding="utf-8")
     if os.name == "nt":
         launcher = directory / "claude.cmd"
@@ -94,6 +113,46 @@ class BlockedToolCall(unittest.TestCase):
             self.assertEqual(records[0]["tool"], "PowerShell")
             self.assertEqual(records[0]["tool_call_id"], TOOL_USE_ID)
             self.assertFalse(records[0]["ok"])
+
+
+class StalledStart(unittest.TestCase):
+    """A send that stalls before its session starts is repeated, once (#6)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        for name, value in (("CLAUDE_PATH", None), ("START_TIMEOUT_SECONDS", 2)):
+            self.addCleanup(setattr, agent_cc, name, getattr(agent_cc, name))
+            if value is not None:
+                setattr(agent_cc, name, value)
+
+    def send(self, stall_first=0, pause_after_init=0.0):
+        agent_cc.CLAUDE_PATH = str(fake_claude(self.tmp, BLOCKED_CALL, stall_first,
+                                               pause_after_init))
+        return agent_cc.run(PiRequest(
+            prompt="build it", system_prompt="you build", model="sonnet",
+            session_id="sess", session_dir=str(self.tmp / "session"),
+            raw_output_path=str(self.tmp / "session" / "raw_output.jsonl"),
+            cwd=str(self.tmp), idle_timeout_seconds=20))
+
+    def launches(self) -> int:
+        return int((self.tmp / "launches").read_text())
+
+    def test_a_send_that_stalls_before_init_is_repeated_not_failed(self):
+        started = time.monotonic()
+        self.assertEqual(self.send(stall_first=1).text, "done")
+        self.assertEqual(self.launches(), 2)
+        self.assertLess(time.monotonic() - started, 15, "waited out the idle window")
+
+    def test_a_send_that_stalls_twice_fails_as_a_stalled_start(self):
+        with self.assertRaisesRegex(procs.StalledStart, "did not start a session within 2s"):
+            self.send(stall_first=2)
+        self.assertEqual(self.launches(), 2)
+
+    def test_silence_after_init_gets_the_whole_idle_window(self):
+        self.assertEqual(self.send(pause_after_init=4).text, "done")
+        self.assertEqual(self.launches(), 1)
 
 
 if __name__ == "__main__":

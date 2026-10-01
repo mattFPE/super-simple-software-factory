@@ -120,6 +120,7 @@ Set `coding_agent: claude_code` on an agent (or in `defaults`) and give it a Cla
 - **`thinking`** maps to `--effort`; `off` and `minimal` become `low`, Claude Code's floor.
 - **Permissions**: the agent runs with `--permission-mode bypassPermissions` — `tools` limits capability and `writes` is enforced after the call, as for pi. `--strict-mcp-config` and `--disable-slash-commands` keep your MCP servers and skills out of the agent. Your settings, hooks and `CLAUDE.md` still load.
 - **Sessions**: the SSSF session id maps to a stable UUID; the first send creates it (`--session-id`), later sends `--resume` it. State lives in `{agent}/claude_code_sessions/`.
+- **Stalled starts**: a send that hasn't started its session (no `init` event) 90s after launch, or within `idle_timeout_seconds` if that is shorter, is killed and repeated once. Nothing has been sent at that point, so repeating is safe. Claude Code can stall this way in one of your hooks, e.g. `SessionStart` on `--resume`. A second stall fails the phase as "did not start a session". `idle_timeout_seconds: 0` turns this off too.
 - **Cost** is Claude Code's `modelUsage`, billed per send as a delta (resume reports session totals). Per-component costs are 0; `total_cost` is exact.
 
 Output types are deliberately absent: config defines who an agent *is*; the ADW call site defines how it's *used*. One agent serves many calls — same system prompt, different user prompt + output type per call.
