@@ -296,8 +296,14 @@ export type GatesResponse = GateResult[];
 /** GET /api/health */
 export interface HealthResponse {
   ok: boolean;
-  /** Identifies this server, so `obs.ts stop` never kills a stranger on the port. */
+  /**
+   * Identifies this server, so `background.ts stop` never kills a stranger on
+   * the port. Still the pre-rename name for one release, because tooling from
+   * before the Console reads this field alone; it becomes "sssf-console" next.
+   */
   service: "sssf-visualizer";
+  /** Every name this server answers to, new first: the Console and, for one release, the visualizer. */
+  services: ["sssf-console", "sssf-visualizer"];
   pid: number;
   db: string;
   journal_mode: string;

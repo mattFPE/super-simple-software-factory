@@ -40,7 +40,7 @@ adws/
     │   ├── agent_map.json       agent → coding-agent session_id + model
     │   ├── context_handoff/     the one place agents write files for the agents that follow
     │   └── {agent}/{prompts/, raw_output.jsonl, envelope.json}
-    └── sssf.db                  gitignored SQLite trace db the visualizer polls
+    └── sssf.db                  gitignored SQLite trace db the Console polls
 ```
 
 **Committing chains run in a worktree.** Anything that ends in a commit works in `../<repo>.sssf-worktrees/<adw_id>` on branch `sssf/<adw_id>`, never in the engineer's checkout; the trace, config and prompts stay in the checkout. `--merge` / `--pr` decide how it lands; `--in-place` opts out.

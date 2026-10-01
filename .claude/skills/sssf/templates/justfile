@@ -44,7 +44,7 @@ demo:
     uv run adws/adw_prompt.py --config {{config}} --agent scout "reply with a one-line summary of this repo"
     @printf '\n2/2  adw_scout: read-only recon\n'
     uv run adws/adw_scout.py --config {{config}} "list the top-level directories in this repo and what each is for. change nothing."
-    @printf '\nboth done. now run:  just sessions    (or: just obs)\n'
+    @printf '\nboth done. now run:  just sessions    (or: just console)\n'
 
 # ── run a workflow ──────────────────────────────────────────────────────────
 # Args pass straight through: "<prompt or path/to/prompt.md>" [--adw-id X]
@@ -117,24 +117,30 @@ worktree-rm ADW_ID:
 sssf-update *ARGS:
     uv run adws/adw_modules/sssf_update.py "$@"
 
-# ── observability UI ────────────────────────────────────────────────────────
+# ── the Console ─────────────────────────────────────────────────────────────
 
 # Needs bun. The UI is built into dist/ and ONE server process serves it. It
-# runs in the background, so your terminal stays free; `obs-stop` ends it by
-# asking the server for its own pid (server/obs.ts), so nothing is left behind.
-# The db path is passed explicitly because the server runs from the app dir and
-# would otherwise look for a trace db sitting next to itself. It is
-# single-quoted because on Windows it is a C:\... path, and sh eats unquoted \.
-viz := ".claude/skills/sssf/apps/visualizer"
+# runs in the background, so your terminal stays free; `console-stop` ends it
+# by asking the server for its own pid (server/background.ts), so nothing is
+# left behind. The db path is passed explicitly because the server runs from
+# the app dir and would otherwise look for a trace db sitting next to itself.
+# It is single-quoted because on Windows it is a C:\... path, and sh eats
+# unquoted \.
+console_app := ".claude/skills/sssf/apps/console"
 
-# start the trace UI in the background, http://localhost:4600
-obs:
-    @cd {{viz}} && bun install --silent && bun run server/obs.ts start --db '{{justfile_directory()}}/{{db}}'
+# start the Console in the background, http://localhost:4600
+console:
+    @cd {{console_app}} && bun install --silent && bun run server/background.ts start --db '{{justfile_directory()}}/{{db}}'
 
-# stop the background trace UI
-obs-stop:
-    @cd {{viz}} && bun run server/obs.ts stop
+# stop the background Console
+console-stop:
+    @cd {{console_app}} && bun run server/background.ts stop
 
-# is the trace UI running, and on which db
-obs-status:
-    @cd {{viz}} && bun run server/obs.ts status
+# is the Console running, and on which db
+console-status:
+    @cd {{console_app}} && bun run server/background.ts status
+
+# The Console's names before the rename, kept for one release.
+alias obs := console
+alias obs-stop := console-stop
+alias obs-status := console-status

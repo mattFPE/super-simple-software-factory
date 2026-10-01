@@ -26,14 +26,14 @@ defaults:
 
 observability:
   db: adws/adw_data/sssf.db        # tracer writes here; the UI polls it
-  poll_ms: 500                     # visualizer live-poll cadence
+  poll_ms: 500                     # Console live-poll cadence
 
 agents:
   - name: planner                  # ADW scripts name agents, never models
     coding_agent: pi
     model: google/gemini-3.6-flash
     thinking: high
-    color: "#a78bfa"               # optional hex — this agent's lane color in the visualizer
+    color: "#a78bfa"               # optional hex — this agent's lane color in the Console
     purpose: Turn a request into a plan the builder can implement without asking questions.
     prompt_engineering:
       system: adws/adw_data/prompt_engineering/planner/system.md

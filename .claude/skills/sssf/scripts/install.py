@@ -39,7 +39,7 @@ TEMPLATES = SKILL / "templates"
 MANIFEST = Path("adws") / ".sssf_stamp.json"
 UPDATE_SCRIPT = "adws/adw_modules/sssf_update.py"
 # Where the README's quick start copies the skill into a repo. A copy there is
-# what `/sssf` and `just obs` use, so an update from a newer sssf refreshes it.
+# what `/sssf` and `just console` use, so an update from a newer sssf refreshes it.
 SKILL_COPY = Path(".claude") / "skills" / "sssf"
 SKILL_COPY_SKIP = {"node_modules", "dist", "__pycache__", ".git"}
 SMOKE_TIMEOUT = 180
@@ -62,6 +62,33 @@ UPDATE_RECIPE = """
 sssf-update *ARGS:
     uv run adws/adw_modules/sssf_update.py "$@"
 """
+
+# The Console was the visualizer until 2026-10. `--update` rewrites these in a
+# justfile you edited, so its recipes run the renamed app.
+CONSOLE_RENAMES = {
+    ".claude/skills/sssf/apps/visualizer": ".claude/skills/sssf/apps/console",
+    "server/obs.ts": "server/background.ts",
+}
+
+# The recipes `--update` adds to a justfile you edited, when it has none. <db>
+# becomes your justfile's own `db`, or the default where it has none.
+CONSOLE_RECIPES = """
+# start the Console in the background, http://localhost:4600
+console:
+    @cd .claude/skills/sssf/apps/console && bun install --silent && bun run server/background.ts start --db '{{justfile_directory()}}/<db>'
+
+# stop the background Console
+console-stop:
+    @cd .claude/skills/sssf/apps/console && bun run server/background.ts stop
+
+# is the Console running, and on which db
+console-status:
+    @cd .claude/skills/sssf/apps/console && bun run server/background.ts status
+"""
+
+# The Console's names before the rename: aliases `--update` adds to a justfile
+# you edited, where it has neither the recipe nor the alias. Kept for one release.
+CONSOLE_ALIASES = {"obs": "console", "obs-stop": "console-stop", "obs-status": "console-status"}
 
 
 def digest(path: Path) -> str:
@@ -276,7 +303,7 @@ def install(root: Path, mode: str) -> int:
     print("  1. cp .env.sample .env   # then set the key(s) your roster needs")
     print("  2. just demo             # two cheap read-only runs, end to end")
     print("  3. just sessions         # what just happened")
-    print("  4. just obs              # the trace UI in the background, needs bun")
+    print("  4. just console          # the Console in the background, needs bun")
     print("\n  no just? the raw form of step 2 is:")
     print("     uv run adws/adw_prompt.py \"say hello\" --agent scout")
     print("\n  later, to take a newer sssf: just sssf-update")
@@ -372,6 +399,8 @@ def update(root: Path, overwrite_edited: bool, allow_dirty: bool) -> int:
         with justfile.open("a", encoding="utf-8") as f:
             f.write(UPDATE_RECIPE)
         notes.append("justfile: added the sssf-update recipe to your edited justfile")
+    if justfile.is_file():
+        notes += point_justfile_at_console(justfile)
     gitignore: list[str] = []
     ensure_gitignore(root, gitignore)
     notes += gitignore
@@ -435,7 +464,62 @@ def refresh_skill_copy(root: Path) -> list[str]:
     for rel in theirs.keys() - ours.keys():
         theirs[rel].unlink()
         changed += 1
-    return [f"skill copy: {SKILL_COPY.as_posix()} refreshed ({changed} file(s))"] if changed else []
+    notes = [f"skill copy: {SKILL_COPY.as_posix()} refreshed ({changed} file(s))"] if changed else []
+    return notes + remove_leftover_dirs(copy_dir, set(ours))
+
+
+def remove_leftover_dirs(copy_dir: Path, ours: set[str]) -> list[str]:
+    """Delete the copy's directories this skill no longer has, like an app since
+    renamed: once its files are gone, only build output and installed packages
+    are left there, and nothing else would ever clean them up."""
+    owned = {parent.as_posix() for rel in ours for parent in Path(rel).parents}
+    notes = []
+    for path in sorted(p for p in copy_dir.rglob("*") if p.is_dir()):
+        rel = path.relative_to(copy_dir)
+        if not path.exists() or SKILL_COPY_SKIP & set(rel.parts) or rel.as_posix() in owned:
+            continue
+        where = (SKILL_COPY / rel).as_posix()
+        try:
+            shutil.rmtree(path)
+            notes.append(f"skill copy: removed {where}, which this version no longer has")
+        except OSError as error:
+            notes.append(f"skill copy: could not remove {where} ({error.strerror}): stop "
+                         "anything running from it (just console-stop), then delete it")
+    return notes
+
+
+def point_justfile_at_console(justfile: Path) -> list[str]:
+    """Run the Console from a justfile you edited before the rename.
+
+    Only sssf's own paths are rewritten, so the recipes you wrote are untouched;
+    the console recipes, and for one release the obs aliases, are added where
+    it has none.
+    """
+    with justfile.open(encoding="utf-8", newline="") as f:
+        text = f.read()
+    notes = []
+    renamed = text
+    for old, new in CONSOLE_RENAMES.items():
+        renamed = renamed.replace(old, new)
+    if renamed != text:
+        notes.append("justfile: pointed your edited justfile's recipes at the Console "
+                     "(apps/visualizer is now apps/console)")
+    def defines(name: str) -> bool:   # a recipe or an alias, never a `name := value`
+        name = re.escape(name)
+        return bool(re.search(rf"(?m)^(alias\s+{name}\s*:=|{name}(?![\w-])[^:\n]*:(?!=))", renamed))
+    if not defines("console"):
+        db = "{{db}}" if re.search(r"(?m)^db\s*:=", renamed) else "adws/adw_data/sssf.db"
+        renamed += CONSOLE_RECIPES.replace("<db>", db)
+        notes.append("justfile: added the console recipes to your edited justfile")
+    aliases = [f"alias {old} := {new}" for old, new in CONSOLE_ALIASES.items() if not defines(old)]
+    if aliases:
+        renamed += "\n# The Console's names before the rename, kept for one release.\n"
+        renamed += "\n".join(aliases) + "\n"
+        notes.append("justfile: added the obs aliases, kept for one release, to your edited justfile")
+    if renamed != text:
+        with justfile.open("w", encoding="utf-8", newline="") as f:
+            f.write(renamed)
+    return notes
 
 
 def config_keys(path: Path) -> set[str]:

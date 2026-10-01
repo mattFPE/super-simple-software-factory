@@ -22,7 +22,7 @@ Run from the **target repo root** — the cwd is where everything lands. If the 
 | `adws/adw_modules/` | `templates/adws/adw_modules/` | yes — all low-level logic |
 | `adws/adw_data/prompt_engineering/{planner,builder,scout,reviewer,documenter}/` | `templates/prompt_engineering/` | yes — **the user-owned home for prompts** |
 | `adws/adw_data/harness_engineering/` | `templates/harness_engineering/` | yes — **the user-owned home for pi extensions** |
-| `justfile` | `templates/justfile` | yes — starter recipes: `just demo`, the workflows, the trace reads, `just obs` |
+| `justfile` | `templates/justfile` | yes — starter recipes: `just demo`, the workflows, the trace reads, `just console` |
 | `adws/.sssf_stamp.json` | written by `install.py` | yes — a hash of every stamped file and where sssf came from, so an update can tell your edits from its own files and knows where to update from |
 | `adws/adw_data/sessions/`, `adws/adw_data/sssf.db` | created at runtime | no — gitignored |
 
@@ -57,7 +57,7 @@ Your config rarely needs merging. Defaults live in code, so a key the config doe
 
 Whichever it finds, it runs that version's own `install.py --update`, so the update logic is always the newer one's.
 
-**A copy of the skill inside the repo** (`.claude/skills/sssf`, as the README's quick start makes) can't update itself. It is only as new as the copy, and the update says so. Name the real source once with `--source`. From then on it is recorded, and each update also refreshes the in-repo copy, so `/sssf`, the cookbooks and `just obs` match the code. Build output and installed packages (`dist/`, `node_modules/`) are left alone.
+**A copy of the skill inside the repo** (`.claude/skills/sssf`, as the README's quick start makes) can't update itself. It is only as new as the copy, and the update says so. Name the real source once with `--source`. From then on it is recorded, and each update also refreshes the in-repo copy, so `/sssf`, the cookbooks and `just console` match the code. Build output and installed packages (`dist/`, `node_modules/`) are left alone, except in a directory this version no longer has, such as `apps/visualizer` after it became `apps/console`.
 
 **The first update** of a repo stamped before `just sssf-update` existed has no recipe yet. Run the newer installer directly, once, from the repo root:
 

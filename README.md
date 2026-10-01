@@ -58,7 +58,7 @@ Copy `.claude/skills/sssf/` into the target repo and type `/sssf install` inside
 
 ### Manual Install
 
-**Prereqs:** [`uv`](https://docs.astral.sh/uv/), [`pi`](https://github.com/mariozechner/pi-coding-agent), `sqlite3`, and an API key for whichever providers your roster names (see below). [`bun`](https://bun.sh) only if you want the visualizer.
+**Prereqs:** [`uv`](https://docs.astral.sh/uv/), [`pi`](https://github.com/mariozechner/pi-coding-agent), `sqlite3`, and an API key for whichever providers your roster names (see below). [`bun`](https://bun.sh) only if you want the Console.
 
 ```bash
 # 1. get the skill into the target repo
@@ -74,7 +74,7 @@ git init && git commit --allow-empty -m init     # chains that end in a commit p
 # 3. smoke test: two cheap read-only runs, end to end
 just demo
 just sessions              # what just happened
-just obs                   # the trace UI in the background, needs bun (just obs-stop ends it)
+just console               # the Console in the background, needs bun (just console-stop ends it)
 
 # no just? every recipe is one line. the raw form of `just demo` is:
 uv run adws/adw_prompt.py "reply with a one-line summary of this repo" --agent scout
@@ -269,10 +269,10 @@ That one cursor query is the entire transport. Live view and full history are th
 
 Files stay the raw record (`raw_output.jsonl`, `envelope.json`, `agent_map.json`). The db is the queryable mirror. Losing it loses nothing you cannot rebuild.
 
-The skill ships a read-only UI for this db at `.claude/skills/sssf/apps/visualizer/`: Vue and Vite served by Bun on port 4600, with sessions, a trace waterfall, and per-phase tool-call detail.
+The skill ships the Console, a read-only UI for this db, at `.claude/skills/sssf/apps/console/`: Vue and Vite served by Bun on port 4600, with sessions, a trace waterfall, and per-phase tool-call detail. It was the visualizer until 2026-10, and `just obs`, `obs-stop` and `obs-status` still work as aliases of `just console`, `console-stop` and `console-status` for one release.
 
 ```bash
-cd .claude/skills/sssf/apps/visualizer && bun install
+cd .claude/skills/sssf/apps/console && bun install
 SSSF_DB=/abs/path/to/your-repo/adws/adw_data/sssf.db bun run server/index.ts &
 bunx vite
 ```
@@ -290,7 +290,7 @@ super-simple-software-factory/          # the deployable factory, and nothing el
     ├── cookbooks/                      # 9 orchestrator playbooks, loaded lazily
     ├── references/                     # config / handoff / observability specs
     ├── scripts/                        # install.py, make_config.py, make_adw.py
-    ├── apps/visualizer/                # the read-only trace UI (Vue + Vite on Bun)
+    ├── apps/console/                   # the Console: the read-only trace UI (Vue + Vite on Bun)
     └── templates/                      # EXACTLY what install.py stamps
         ├── sssf.config.yaml            # the starter roster
         ├── prompt_engineering/{agent}/ # system.md + user.md per agent

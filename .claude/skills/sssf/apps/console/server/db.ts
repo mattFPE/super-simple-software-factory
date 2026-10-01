@@ -34,7 +34,7 @@ const DEFAULT_LIMIT = 500;
 
 /**
  * Resolve the db path: --db arg wins, then SSSF_DB, then <cwd>/adws/adw_data/sssf.db.
- * The db lives in the TARGET repo, so cwd is the repo the visualizer is pointed at.
+ * The db lives in the TARGET repo, so cwd is the repo the Console is pointed at.
  */
 export function resolveDbPath(argv: string[] = Bun.argv): string {
   const flagIndex = argv.indexOf("--db");
@@ -68,7 +68,7 @@ export class SssfDb {
     if (!existsSync(path)) {
       throw new Error(
         `sssf.db not found at ${path}\n` +
-          `Point the visualizer at a target repo: --db <path> or SSSF_DB=<path>, ` +
+          `Point the Console at a target repo: --db <path> or SSSF_DB=<path>, ` +
           `or run it from a repo root containing ${DEFAULT_DB_RELATIVE}`,
       );
     }

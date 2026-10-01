@@ -79,7 +79,7 @@ The trace db is `adws/adw_data/sssf.db`. It is WAL, so reads never block the run
 sqlite3 adws/adw_data/sssf.db \
   "select seq, name, kind, owner, status, attempt from phases where adw_id='a1b2c3d4' order by seq;"
 
-# the live tail — cursor on rowid, same query the visualizer polls
+# the live tail — cursor on rowid, same query the Console polls
 sqlite3 adws/adw_data/sssf.db \
   "select rowid, type, name, started_at from events where adw_id='a1b2c3d4' and rowid > 0 order by rowid limit 50;"
 
@@ -123,4 +123,4 @@ A killed run marks itself `fail` and closes its process rows, so the trace never
 
 Tell the engineer, in order: which chain and which roster you launched (name the config whenever it was not the default), which phase is running now (or which failed), phase statuses in sequence, and for a failure the gate violations or the error verbatim. Remember **every phase defaults to `fail`** — a phase showing `fail` may simply never have completed; `queued` means it never started. Don't dress up a partial run as a success.
 
-For a visual live view, the visualizer app in the skill (`just obs` → http://localhost:4600 in the background, `just obs-stop` / `just obs-status`; or for UI development, `bun run server` :4600 + `bun run dev` :4601) polls this same db — sessions as cards, runs as swim lanes, phases and tool calls drill-in. The sqlite queries above remain the headless equivalent.
+For a visual live view, the Console in the skill (`just console` → http://localhost:4600 in the background, `just console-stop` / `just console-status`; or for UI development, `bun run server` :4600 + `bun run dev` :4601) polls this same db — sessions as cards, runs as swim lanes, phases and tool calls drill-in. The sqlite queries above remain the headless equivalent. Its names from when it was the visualizer, `just obs`, `obs-stop` and `obs-status`, are aliases kept for one release.

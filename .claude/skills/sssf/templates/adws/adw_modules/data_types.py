@@ -551,6 +551,6 @@ class PiResult(BaseModel):
     usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
     # Context occupancy after the LAST turn — not a sum. `tokens` bills every
     # turn; this is how full the window is right now, which is what the
-    # visualizer's context bar measures against `context_window`.
+    # Console's context bar measures against `context_window`.
     context_tokens: int = 0
     context_window: int = 0         # 0 when the registry declares no ceiling

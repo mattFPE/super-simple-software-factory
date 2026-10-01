@@ -43,7 +43,7 @@ defaults:
 
 observability:
   db: adws/adw_data/sssf.db        # tracer writes here directly; the UI polls it
-  poll_ms: 500                     # visualizer live-poll cadence
+  poll_ms: 500                     # Console live-poll cadence
 
 # The project's known commands, as argv lists (SKILL.md rule 8). An unset
 # command is "not configured" and never passes: every ADW with a test phase
@@ -75,7 +75,7 @@ agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3
     thinking: high
-    color: "#a78bfa"                 # optional hex — the agent's lane color in the visualizer
+    color: "#a78bfa"                 # optional hex — the agent's lane color in the Console
     purpose: Turn a request into a plan the builder can implement without asking questions.
     prompt_engineering:
       system: adws/adw_data/prompt_engineering/planner/system.md

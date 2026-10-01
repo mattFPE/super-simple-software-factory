@@ -1,5 +1,5 @@
 /**
- * SSSF visualizer server — JSON API over a target repo's sssf.db, plus the
+ * SSSF Console server — JSON API over a target repo's sssf.db, plus the
  * built UI when ./dist exists. Reads are read-only; the single write is
  * POST /api/sessions/:adw_id/archive, which sets one review flag on a row.
  *
@@ -85,7 +85,7 @@ async function serveStatic(req: Request): Promise<Response> {
 
   if (!existsSync(DIST_DIR)) {
     return new Response(
-      `SSSF visualizer API is running on :${PORT}.\n\n` +
+      `SSSF Console API is running on :${PORT}.\n\n` +
         `No ./dist build found. Run "bun run dev" for the Vite dev server ` +
         `(it proxies /api here), or "bun run build" to serve the UI from this process.\n`,
       { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
@@ -120,6 +120,7 @@ const server = Bun.serve({
         json({
           ok: true,
           service: "sssf-visualizer",
+          services: ["sssf-console", "sssf-visualizer"],
           pid: process.pid,
           db: db.path,
           journal_mode: db.journalMode,
@@ -202,7 +203,7 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[sssf] visualizer api  http://localhost:${server.port}`);
+console.log(`[sssf] Console api     http://localhost:${server.port}`);
 console.log(`[sssf] db              ${db.path}  [journal_mode=${db.journalMode}]`);
 console.log(
   existsSync(DIST_DIR)

@@ -46,7 +46,7 @@ agents:
 | `coding_agent` | `pi` \| `claude_code` | Which interface runs the agent: `agent_pi.py` or `agent_cc.py`. Mixable per agent. See [Claude Code agents](#claude-code-agents). |
 | `model` | string \| list | Model id, or candidates in preference order (see [Model resolution](#model-resolution)). For Pi, any id in pi's catalog. For Claude Code, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a `claude-*` id. Default `gemini-3.6-flash`. |
 | `thinking` | enum | Reasoning effort — see below. Default `medium`. |
-| `color` | hex string | Lane color for every agent that does not set its own. Default empty — the visualizer falls back to its own palette. |
+| `color` | hex string | Lane color for every agent that does not set its own. Default empty — the Console falls back to its own palette. |
 | `harness_engineering` | list[string] | Coding-agent extensions. Pi: extension files (`-e`). Claude Code: plugin directories (`--plugin-dir`); a `.ts` pi extension fails validation. |
 | `skills` | list[path] | Roster-wide [skills](#skills). Every agent that omits its own `skills` inherits this. Default `[]`. |
 | `tools` | list[string] | Roster-wide tool allowlist. Every agent that omits its own `tools` inherits this. Unset = all tools usable. |
@@ -58,8 +58,8 @@ agents:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `db` | path | SQLite trace db. `tracer.py` writes it directly; the visualizer polls it. Default `adws/adw_data/sssf.db`. |
-| `poll_ms` | int | Visualizer live-poll cadence in ms. History uses the same queries, lazy-paged. Default `500`. |
+| `db` | path | SQLite trace db. `tracer.py` writes it directly; the Console polls it. Default `adws/adw_data/sssf.db`. |
+| `poll_ms` | int | Console live-poll cadence in ms. History uses the same queries, lazy-paged. Default `500`. |
 
 ### `quality`
 
@@ -106,7 +106,7 @@ The PR stays open either way. A run that fails its checks has already removed it
 | `purpose` | yes | One sentence: what this agent is for. Should match its `system.md` Purpose. |
 | `prompt_engineering.system` | yes | Path to the system prompt — who the agent is, its single purpose, its output contract. |
 | `prompt_engineering.user` | yes | Path to the default user prompt — the task template with `{{prompt}}`, `{{previous_envelope}}`, `{{context_handoff_dir}}`. |
-| `color` | no | Hex swatch (`"#a78bfa"`) for this agent's lane in the visualizer. Travels config → `agent_sessions.color` → `/api/sessions/:adw_id`, and rides the `agent_start` event so a lane is colored while the agent is still running. Unset = the UI's fallback palette. |
+| `color` | no | Hex swatch (`"#a78bfa"`) for this agent's lane in the Console. Travels config → `agent_sessions.color` → `/api/sessions/:adw_id`, and rides the `agent_start` event so a lane is colored while the agent is still running. Unset = the UI's fallback palette. |
 | `coding_agent`, `model`, `thinking`, `color`, `harness_engineering`, `skills`, `idle_timeout_seconds` | no | Override the corresponding `defaults` key. An agent's own `skills` replaces the default list; it doesn't add to it. |
 | `tools` | no | Allowlist. **Omitting the key means all tools usable.** A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. Omitted = unrestricted (still barred from `protected_files`). `[]` = no repo writes at all. A list = only those paths: a trailing `/` is a directory prefix, `*` matches within one path segment, `**` crosses segments, anything else is an exact path. An entry inside a protected area unlocks the part of it the entry matches: `.github/workflows/` unlocks CI's workflows, but a broad `**/*.md` unlocks no prompt or `SKILL.md`. **The session runtime, `data_dir/sessions/`, is always writable** — `writes: []` means read-only with respect to the repo, not unable to write its own report. |
