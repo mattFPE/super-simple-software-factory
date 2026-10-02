@@ -12,7 +12,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import type { AdwCatalog, Launch, LaunchPreview, SessionDetail } from "../shared/types.ts";
@@ -185,6 +185,16 @@ async function continueRun(r: Repo, adwId: string, adw: string, values: Record<s
   const done = await api<Launch>(r, "/api/launches", { adw, values, continues: adwId });
   expect(done.status).toBe(201);
   return done.body;
+}
+
+/** The trace db's files as they stand on disk: any write changes one. */
+function dbFiles(r: Repo): (string | null)[] {
+  return ["", "-wal"].map((suffix) => {
+    const path = r.db + suffix;
+    if (!existsSync(path)) return null;
+    const stat = statSync(path);
+    return `${stat.size}:${stat.mtimeMs}`;
+  });
 }
 
 async function launchState(r: Repo, adwId: string): Promise<Launch | undefined> {
@@ -472,6 +482,53 @@ describe("Continue with…", () => {
     const changed = await api(r, "/api/launches", { adw: "adw_resume", values: { prompt: "y" }, continues: runId });
     expect(changed.status).toBe(409);
     expect((await launchState(r, runId))?.continuing).toBe(false);   // only the first Run's Launch
+  });
+});
+
+describe("Dismiss", () => {
+  test("forgets a Refused Launch for good, and keeps its log", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_refuse", { prompt: "anything" });
+    await settlesAs(r, started.adw_id, "refused");
+    const before = dbFiles(r);
+
+    const done = await api(r, `/api/launches/${started.adw_id}/dismiss`, {});
+    expect(done.status).toBe(200);
+    expect(await launchState(r, started.adw_id)).toBeUndefined();
+    expect(await launchState(r, started.adw_id)).toBeUndefined();   // the next poll too
+
+    const log = await api<string>(r, `/api/launches/${started.adw_id}/log`);
+    expect(log.status).toBe(200);
+    expect(log.body).toContain("no 'builder' agent");
+    expect(dbFiles(r)).toEqual(before);
+  });
+
+  test("turns down a Starting Launch, and an id it doesn't know, and changes nothing", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_hang", { prompt: "look around" });
+    expect((await launchState(r, started.adw_id))?.state).toBe("starting");
+
+    const starting = await api<{ error: string }>(r, `/api/launches/${started.adw_id}/dismiss`, {});
+    expect(starting.status).toBe(409);
+    expect(starting.body.error).toContain("still starting");
+    const unknown = await api<{ error: string }>(r, "/api/launches/nosuchlaunch/dismiss", {});
+    expect(unknown.status).toBe(404);
+    expect((await api<Launch[]>(r, "/api/launches")).body.map((l) => l.adw_id)).toEqual([started.adw_id]);
+    expect((await launchState(r, started.adw_id))?.state).toBe("starting");
+
+    release(r.root);
+    await settlesAs(r, started.adw_id, "refused");
+  });
+
+  test("turns down a Launch that became its Run", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: "keep me" });
+    await settlesAs(r, started.adw_id, "started");
+    expect((await api(r, `/api/launches/${started.adw_id}/dismiss`, {})).status).toBe(409);
+    expect((await launchState(r, started.adw_id))?.state).toBe("started");
   });
 });
 

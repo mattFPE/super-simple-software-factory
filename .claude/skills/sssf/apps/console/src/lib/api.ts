@@ -111,6 +111,11 @@ export function fetchLaunches(): Promise<Launch[]> {
   return getJson('/api/launches') as Promise<Launch[]>
 }
 
+/** Forget a Refused Launch; its log stays readable. */
+export async function dismissLaunch(adwId: string): Promise<void> {
+  await postJson(`/api/launches/${encodeURIComponent(adwId)}/dismiss`, {})
+}
+
 export async function fetchLaunchLog(adwId: string): Promise<string> {
   const url = `/api/launches/${encodeURIComponent(adwId)}/log`
   const res = await fetch(url)

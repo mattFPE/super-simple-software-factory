@@ -20,6 +20,20 @@ export const continuing = shallowRef<{ adwId: string; adw: string } | null>(null
  */
 export const launches = shallowRef<Launch[]>([])
 
+/** Launches dismissed here: a poll already in flight when one went mustn't bring it back. */
+const dismissed = new Set<string>()
+
 export function addLaunch(launch: Launch): void {
+  dismissed.delete(launch.adw_id)
   launches.value = [launch, ...launches.value.filter((l) => l.adw_id !== launch.adw_id)]
+}
+
+export function removeLaunch(adwId: string): void {
+  dismissed.add(adwId)
+  launches.value = launches.value.filter((l) => l.adw_id !== adwId)
+}
+
+/** A poll's answer, less any Launch dismissed while it was on its way. */
+export function syncLaunches(polled: Launch[]): void {
+  launches.value = polled.filter((l) => !dismissed.has(l.adw_id))
 }

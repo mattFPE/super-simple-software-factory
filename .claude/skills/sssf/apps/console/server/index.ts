@@ -175,6 +175,15 @@ const server = Bun.serve({
       POST: safely(async (req) => json(await launches.preview(await launchRequest(req)))),
     },
 
+    // Forget a Refused Launch. Its log stays, and the trace is never written.
+    "/api/launches/:adw_id/dismiss": {
+      POST: safely((req) => {
+        const adwId = param(req, "adw_id");
+        launches.dismiss(adwId);
+        return json({ adw_id: adwId, dismissed: true });
+      }),
+    },
+
     // Everything the ADW printed: for a Refused Launch, the only record there is.
     "/api/launches/:adw_id/log": safely((req) => {
       const path = launches.logPath(param(req, "adw_id"));

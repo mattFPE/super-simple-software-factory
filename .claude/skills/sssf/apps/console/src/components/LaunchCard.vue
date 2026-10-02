@@ -1,13 +1,29 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { Launch } from '../lib/types'
-import { fetchLaunchLog } from '../lib/api'
+import { dismissLaunch, fetchLaunchLog } from '../lib/api'
+import { removeLaunch } from '../lib/launches'
 import { messageOf } from '../lib/format'
 
 const props = defineProps<{ launch: Launch }>()
 
 const log = ref<string | null>(null)
 const logError = ref<string | null>(null)
+const dismissError = ref<string | null>(null)
+const dismissing = ref(false)
+
+async function dismiss(): Promise<void> {
+  dismissing.value = true
+  dismissError.value = null
+  try {
+    await dismissLaunch(props.launch.adw_id)
+    removeLaunch(props.launch.adw_id)
+  } catch (err) {
+    dismissError.value = messageOf(err)
+  } finally {
+    dismissing.value = false
+  }
+}
 
 async function toggleLog(): Promise<void> {
   if (log.value !== null) {
@@ -39,10 +55,14 @@ async function toggleLog(): Promise<void> {
       <pre class="tail">{{ launch.log_tail || '(it printed nothing)' }}</pre>
     </template>
     <span v-else class="dim">waiting for the Run to appear in the trace…</span>
-    <div>
+    <div class="actions">
       <button type="button" @click="toggleLog">{{ log === null ? 'Show full log' : 'Hide log' }}</button>
+      <button v-if="launch.state === 'refused'" type="button" :disabled="dismissing" @click="dismiss">
+        Dismiss
+      </button>
     </div>
     <div v-if="logError" class="error-text">{{ logError }}</div>
+    <div v-if="dismissError" class="error-text">{{ dismissError }}</div>
     <pre v-if="log !== null" class="log">{{ log }}</pre>
   </article>
 </template>
@@ -115,6 +135,11 @@ async function toggleLog(): Promise<void> {
   overflow-y: auto;
 }
 
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
 button {
   padding: 6px 14px;
   border: 1px solid var(--border);
@@ -123,6 +148,11 @@ button {
   color: var(--text);
   font: inherit;
   cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .error-text {

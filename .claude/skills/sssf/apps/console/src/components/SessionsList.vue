@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import type { SessionSummary } from '../lib/types'
 import { fetchLaunches, fetchSessions } from '../lib/api'
-import { launches } from '../lib/launches'
+import { launches, syncLaunches } from '../lib/launches'
 import { ts } from '../lib/format'
 import LaunchCard from './LaunchCard.vue'
 import SessionCard from './SessionCard.vue'
@@ -21,7 +21,7 @@ async function tick() {
   try {
     const [rows, launched] = await Promise.all([fetchSessions(), fetchLaunches()])
     sessions.value = rows
-    launches.value = launched
+    syncLaunches(launched)
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true

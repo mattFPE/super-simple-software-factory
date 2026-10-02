@@ -414,6 +414,20 @@ export class Launches {
     return held;
   }
 
+  /**
+   * Forget a Refused Launch, so a run of bad ones doesn't bury the Runs. Its
+   * log stays in its session dir and the trace is untouched (ADR 0001). A
+   * Starting one is still running: stopping it isn't dismissing it.
+   */
+  dismiss(adwId: string): void {
+    const entry = this.entries.get(adwId);
+    if (!entry) throw new HttpError(404, `no Launch ${adwId}`);
+    const { state } = this.view(entry);
+    if (state === "starting") throw new HttpError(409, `${adwId} is still starting: only a Refused Launch can be dismissed`);
+    if (state !== "refused") throw new HttpError(409, `${adwId} became its Run: only a Refused Launch can be dismissed`);
+    this.entries.delete(adwId);
+  }
+
   list(): Launch[] {
     return [...this.entries.values()].toReversed().map((entry) => this.view(entry));
   }
