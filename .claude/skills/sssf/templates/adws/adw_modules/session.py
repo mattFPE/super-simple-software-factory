@@ -116,6 +116,47 @@ class _Describe(argparse.Action):
         parser.exit()
 
 
+class _CheckArgs(argparse.Action):
+    """`--check-args <argv…>`: whether this ADW would accept `argv`, starting nothing.
+
+    Listed so `--help` shows it, but answered before argparse sees the command
+    line (`_answer_check_args`): argparse stops an option's values at `--`,
+    where the prompt goes. Reached here, it wasn't first.
+    """
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=argparse.REMAINDER, default=argparse.SUPPRESS,
+                         **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(f"{option_string} comes first: everything after it is the argv it checks")
+
+
+def _answer_check_args(parser) -> None:
+    """Make `parser` refuse what `check_argv` refuses, and answer `--check-args`.
+
+    Every parse ends in `check_argv`, so a run turns a bad combination down
+    before it resolves its prompt: an issue isn't fetched only to be refused.
+    A leading `--check-args` parses the argv after it the same way and prints
+    `ok`, so a refusal reads exactly as a real Launch's would. Whether an issue
+    is Runnable is left to the Launch: no config, issue, trace or network is
+    touched here.
+    """
+    parse_known_args = parser.parse_known_args
+
+    def parse(args=None, namespace=None):
+        argv = sys.argv[1:] if args is None else list(args)
+        if argv[:1] != ["--check-args"]:
+            parsed = parse_known_args(argv, namespace)
+            check_argv(parsed[0])
+            return parsed
+        parser.parse_args(argv[1:])
+        print("ok")
+        parser.exit()
+
+    parser.parse_known_args = parse
+
+
 def _flag(action) -> str | None:
     """The option's long spelling (`--adw-id`); None for a positional."""
     strings = action.option_strings
@@ -125,11 +166,12 @@ def _flag(action) -> str | None:
 def describe(parser, commits: bool, resumes: bool) -> dict:
     """The options `parser` accepts, read from the parser itself so it can't drift."""
     shown = [a for a in parser._actions
-             if not isinstance(a, (argparse._HelpAction, _Describe))
+             if not isinstance(a, (argparse._HelpAction, _Describe, _CheckArgs))
              and a.help is not argparse.SUPPRESS]               # hidden on purpose
     return {
         "commits": commits,
         "resumes": resumes,
+        "checks_args": True,
         "options": [{
             "name": a.dest,
             "flag": _flag(a),
@@ -148,10 +190,14 @@ def add_cli_args(parser, commits: bool = False, resumes: bool = False) -> None:
     """The flags every ADW shares; `commits=True` adds the worktree/landing ones.
 
     `resumes=True` marks a Resuming ADW: one that continues an earlier Run's work
-    under its `--adw-id`. Both are reported by `--describe`, which every ADW gets.
+    under its `--adw-id`. Both are reported by `--describe`, which every ADW gets,
+    as it gets `--check-args`.
     """
+    _answer_check_args(parser)
     parser.add_argument("--describe", action=_Describe, commits=commits, resumes=resumes,
                         help="print this ADW's options as JSON and exit")
+    parser.add_argument("--check-args", action=_CheckArgs,
+                        help="check the argv that follows as this ADW would, print ok and exit")
     parser.add_argument("--config", default="adws/adw_sssf_config/sssf.config.yaml")
     parser.add_argument("--adw-id", default=None, help="join or pin an existing session")
     if not commits:
@@ -175,14 +221,37 @@ def add_cli_args(parser, commits: bool = False, resumes: bool = False) -> None:
                              "open PR already closes it (e.g. after a hard kill)")
 
 
+def check_argv(args) -> None:
+    """Refuse what argparse can't: option combinations no ADW run accepts.
+
+    Only the parsed argv is read, never the issue it names. Parsing asks it
+    (`_answer_check_args`), for `--check-args` and a real run alike, and
+    `cli_options` asks again of whatever args it is handed. The flags are
+    `add_cli_args(commits=True)`'s: an ADW without them has nothing to refuse.
+    """
+    if not hasattr(args, "in_place"):
+        return
+    in_place = getattr(args, "in_place", False)
+    if getattr(args, "allow_dirty", False) and not in_place:
+        raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "
+                         "from your last commit and never sees your uncommitted changes")
+    if in_place and (getattr(args, "merge", False) or getattr(args, "pr", False)):
+        raise SystemExit("--merge / --pr end a worktree run; with --in-place the commit is "
+                         "already on your branch")
+    if getattr(args, "force", False) and not issues.is_issue(args.prompt):
+        raise SystemExit("--force only applies when the prompt is an issue (#42, its URL, "
+                         "or a local issue's path)")
+
+
 def cli_options(args) -> RunOptions:
+    check_argv(args)
     commits = hasattr(args, "merge")
     # The prompt was already resolved (utils.resolve_prompt), so this is a cache hit.
     issue = issues.load(args.prompt) if issues.is_issue(args.prompt) else None
     if issue and commits:
         issues.require_runnable(issue, force=args.force)
     in_place = getattr(args, "in_place", False)
-    opts = RunOptions(
+    return RunOptions(
         config=args.config, adw_id=args.adw_id, issue=issue,
         in_place=in_place,
         allow_dirty=getattr(args, "allow_dirty", False),
@@ -194,13 +263,3 @@ def cli_options(args) -> RunOptions:
               # the commit is already on your branch.
               else ("merge" if issue.path else "pr") if issue and commits and not in_place
               else "branch"))
-    if opts.allow_dirty and not opts.in_place:
-        raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "
-                         "from your last commit and never sees your uncommitted changes")
-    if opts.in_place and opts.land != "branch":
-        raise SystemExit("--merge / --pr end a worktree run; with --in-place the commit is "
-                         "already on your branch")
-    if getattr(args, "force", False) and not issue:
-        raise SystemExit("--force only applies when the prompt is an issue (#42, its URL, "
-                         "or a local issue's path)")
-    return opts

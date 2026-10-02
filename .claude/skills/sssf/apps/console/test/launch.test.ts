@@ -372,15 +372,14 @@ describe("the confirm step", () => {
     });
   }
 
-  test("turns down options the ADW doesn't take, and more than one landing flag", async () => {
+  test("turns down options the ADW doesn't take, and an adw_id set in the form", async () => {
     const r = repo();
     await startConsole(r);
     const cases: [Record<string, string | boolean>, string][] = [
       [{ prompt: "x", nope: true }, "nope"],
-      [{ prompt: "x", merge: true, pr: true }, "--merge"],
-      [{ prompt: "x", depth: "sideways" }, "sideways"],
-      [{ prompt: "" }, "prompt"],
       [{ prompt: "x", adw_id: "beefbeef" }, "adw_id"],
+      [{ prompt: "x", merge: "yes" }, "--merge is a flag"],
+      [{ prompt: "x", depth: true }, "depth takes text"],
     ];
     for (const [values, named] of cases) {
       const done = await api<{ error: string }>(r, "/api/launches/preview", { adw: "adw_ok", values });
@@ -389,6 +388,120 @@ describe("the confirm step", () => {
     }
     expect((await api(r, "/api/launches/preview", { adw: "adw_resume", values: { prompt: "x" } })).status).toBe(400);
     expect((await api(r, "/api/launches/preview", { adw: "adw_nope", values: { prompt: "x" } })).status).toBe(404);
+  });
+});
+
+/** An ADW on the factory's own shared CLI setup, which answers --check-args for real. */
+const ADW_REAL = `#!/usr/bin/env -S uv run
+# /// script
+# dependencies = ["pydantic", "python-dotenv", "pyyaml", "rich"]
+# ///
+"""ADW Real — the shared CLI setup, and nothing behind it.
+
+Phases: engineer(request) -> builder -> git(commit)
+"""
+import argparse
+from adw_modules import session
+
+parser = argparse.ArgumentParser()
+parser.add_argument("prompt", help="what to do")
+parser.add_argument("--depth", choices=["shallow", "deep"], default="shallow")
+session.add_cli_args(parser, commits=True)
+session.cli_options(parser.parse_args())
+print("ran", flush=True)
+`;
+
+/** An ADW that answers --check-args itself, logging each ask to `checks`, and refusing any argv with "bad" in it. */
+const ADW_CHECKED = stub("ADW Checked — counts its checks.\n\nPhases: engineer(request) -> builder\n",
+  { ...DESCRIBE_PLAIN, checks_args: true },
+  `
+if sys.argv[1] == "--check-args":
+    with open("checks", "a") as f:
+        f.write(json.dumps(sys.argv[2:]) + "\\n")
+    if "bad" in sys.argv:
+        sys.exit("adw_checked.py: error: bad is bad")
+    print("ok")
+    sys.exit(0)
+print("starting", adw_id(), flush=True)
+held()
+`);
+
+/** An ADW from before --check-args: its own argparse, and a description that doesn't offer it. */
+const ADW_UNCHECKED = stub("ADW Unchecked — from before --check-args.\n\nPhases: engineer(request) -> builder\n",
+  { ...DESCRIBE_PLAIN, options: [...SHARED, { name: "depth", flag: "--depth", kind: "choice", help: null,
+    default: "shallow", choices: ["shallow", "deep"], required: false }] },
+  `
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("prompt")
+parser.add_argument("--config")
+parser.add_argument("--adw-id")
+parser.add_argument("--depth", choices=["shallow", "deep"])
+parser.parse_args()
+held()
+`);
+
+/** The argvs adw_checked was asked to check, in order. */
+function checks(r: Repo): string[][] {
+  const path = join(r.root, "checks");
+  return existsSync(path) ? readFileSync(path, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)) : [];
+}
+
+describe("checking the argv with the ADW", () => {
+  test("a preview the ADW's own parser turns down is a 400 carrying the ADW's message", async () => {
+    const r = repo({ "adw_real.py": ADW_REAL }, { modules: true });
+    await startConsole(r);
+    const cases: [Record<string, string | boolean>, string][] = [
+      [{ prompt: "x", depth: "sideways" }, "invalid choice: 'sideways'"],
+      [{ prompt: "x", merge: true, pr: true }, "argument --pr: not allowed with argument --merge"],
+      [{ prompt: "" }, "the following arguments are required: prompt"],
+      [{ prompt: "x", allow_dirty: true }, "--allow-dirty only applies with --in-place"],
+      [{ prompt: "x", in_place: true, merge: true }, "--merge / --pr end a worktree run"],
+      [{ prompt: "x", force: true }, "--force only applies when the prompt is an issue"],
+    ];
+    for (const [values, said] of cases) {
+      const done = await api<{ error: string }>(r, "/api/launches/preview", { adw: "adw_real", values });
+      expect(done.status).toBe(400);
+      expect(done.body.error).toContain(said);
+    }
+    const fine = await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_real", values: { prompt: "#42", merge: true, force: true, depth: "deep" } });
+    expect(fine.status).toBe(200);
+    expect(existsSync(join(r.root, "adws", "adw_data", "sessions"))).toBe(false);
+  });
+
+  test("a Launch of the command a checked preview showed isn't checked again", async () => {
+    const r = repo({ "adw_checked.py": ADW_CHECKED });
+    await startConsole(r);
+    const preview = (await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_checked", values: { prompt: "x" } })).body;
+    expect(checks(r)).toEqual([preview.argv.slice(3)]);
+    const done = await api<Launch>(r, "/api/launches", { adw: "adw_checked", values: { prompt: "x" }, adw_id: preview.adw_id });
+    expect(done.status).toBe(201);
+    expect(checks(r)).toHaveLength(1);
+  });
+
+  test("a Launch with no preview is checked before it spawns, and one its check turns down spawns nothing", async () => {
+    const r = repo({ "adw_checked.py": ADW_CHECKED });
+    await startConsole(r);
+    const started = await launch(r, "adw_checked", { prompt: "x" });
+    expect(checks(r)).toEqual([started.argv.slice(3)]);
+    const refused = await api<{ error: string }>(r, "/api/launches", { adw: "adw_checked", values: { prompt: "bad" } });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("adw_checked.py: error: bad is bad");
+    expect(checks(r)).toHaveLength(2);
+    expect((await api<Launch[]>(r, "/api/launches")).body.map((l) => l.adw_id)).toEqual([started.adw_id]);
+  });
+
+  test("an ADW from before --check-args previews and launches, and a bad argv is Refused", async () => {
+    const r = repo({ "adw_unchecked.py": ADW_UNCHECKED });
+    await startConsole(r);
+    const values = { prompt: "x", depth: "sideways" };
+    expect((await api(r, "/api/launches/preview", { adw: "adw_unchecked", values })).status).toBe(200);
+    const started = await launch(r, "adw_unchecked", values);
+    const refused = await settlesAs(r, started.adw_id, "refused");
+    expect(refused.exit_code).toBe(2);
+    expect(refused.log_tail).toContain("invalid choice: 'sideways'");
   });
 });
 

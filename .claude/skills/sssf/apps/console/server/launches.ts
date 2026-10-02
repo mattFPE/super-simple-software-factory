@@ -4,12 +4,14 @@
  *
  * The catalog is the repo's `adws/adw_*.py`, each read for its docstring and
  * asked for its own command line with `--describe`, so a form can never offer
- * a flag the ADW doesn't take. A Launch spawns exactly what the confirm step
- * showed: an argv list, never a shell, from the repo root, detached so the Run
- * outlives this server. Its output goes to `console.log` in the Run's session
- * dir, and beside it `launch.json` records the Launch itself; those two files
- * are all the Console writes for a Launch. The trace is the ADW's own tracer's
- * to write (ADR 0001).
+ * a flag the ADW doesn't take. Whether it takes the argv a form builds is the
+ * ADW's to say too: a preview asks its `--check-args`, so the rules stay in
+ * Python with the parser they belong to. A Launch spawns exactly what the
+ * confirm step showed: an argv list, never a shell, from the repo root,
+ * detached so the Run outlives this server. Its output goes to `console.log`
+ * in the Run's session dir, and beside it `launch.json` records the Launch
+ * itself; those two files are all the Console writes for a Launch. The trace
+ * is the ADW's own tracer's to write (ADR 0001).
  *
  * A Resuming ADW is launched only to continue a settled Run, under that Run's
  * adw_id, and its Launch is Starting until its own process joins that Run's
@@ -70,7 +72,7 @@ export function resolveRepoRoot(dbPath: string, argv: string[] = Bun.argv): stri
 
 const ADW_FILE = /^adw_[A-Za-z0-9_]+\.py$/;
 const ADW_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const DESCRIBE_TIMEOUT_MS = 120_000;   // a first `uv run` may resolve the script's deps
+const ASK_ADW_TIMEOUT_MS = 120_000;   // a first `uv run` may resolve the script's deps
 const TAIL_LINES = 20;
 const TAIL_BYTES = 16 * 1024;
 const RECORD = "launch.json";
@@ -115,23 +117,42 @@ class DescribeFailed extends Error {
   }
 }
 
-async function runDescribe(repoRoot: string, file: string): Promise<AdwDescription> {
-  const proc = Bun.spawn(["uv", "run", file, "--describe"], {
+/** Ask an ADW something that starts nothing (`--describe`, `--check-args`): its output, its last stderr line and its exit. */
+async function askAdw(
+  repoRoot: string, file: string, args: string[],
+): Promise<{ out: string; said: string; code: number | null }> {
+  const proc = Bun.spawn(["uv", "run", file, ...args], {
     cwd: repoRoot, stdout: "pipe", stderr: "pipe", windowsHide: true,
     env: { ...process.env, PYTHONUTF8: "1" },
   });
-  const timer = setTimeout(() => proc.kill(), DESCRIBE_TIMEOUT_MS);
+  const timer = setTimeout(() => proc.kill(), ASK_ADW_TIMEOUT_MS);
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
   ]).finally(() => clearTimeout(timer));
-  if (code !== 0) {
-    const said = err.trim().split(/\r?\n/).at(-1) ?? "";
-    throw new DescribeFailed(code, `--describe exited ${code}${said ? `: ${said}` : ""}`);
-  }
+  return { out, said: err.trim().split(/\r?\n/).at(-1)?.trim() ?? "", code };
+}
+
+async function runDescribe(repoRoot: string, file: string): Promise<AdwDescription> {
+  const { out, said, code } = await askAdw(repoRoot, file, ["--describe"]);
+  if (code !== 0) throw new DescribeFailed(code, `--describe exited ${code}${said ? `: ${said}` : ""}`);
   const parsed: unknown = JSON.parse(out);
   if (!isDescription(parsed)) throw new DescribeFailed(0, "--describe printed something other than an ADW description");
   return parsed;
 }
+
+/**
+ * Ask the ADW whether it takes the arguments of `argv`, as a Launch of them
+ * would: its own parser, and the checks it makes before starting. Nothing
+ * starts. One it turns down is a 400 with the ADW's own message.
+ */
+async function checkArgs(repoRoot: string, argv: string[]): Promise<void> {
+  const [file, ...args] = adwCommand(argv);
+  const { said, code } = await askAdw(repoRoot, file!, ["--check-args", ...args]);
+  if (code !== 0) throw new HttpError(400, said || `${file} --check-args exited ${code}`);
+}
+
+/** A Launch's argv past `uv run`: the ADW's file and its arguments. */
+const adwCommand = (argv: string[]): string[] => argv.slice(2);
 
 /**
  * POSIX quoting, so the shown command pastes into a terminal and means the
@@ -171,6 +192,9 @@ function commandsFor(argv: string[]): Pick<LaunchPreview, "commands" | "shell"> 
  * as `--flag=value` for the same reason. An issue reference, which can't be read
  * as an option, goes first instead: `"#42" --adw-id …` or `.scratch/…/03-x.md
  * --adw-id …`, the shape the ADWs' outcome comments give for a rerun.
+ *
+ * Only the argv is built here. Whether the ADW takes it — a choice, flags that
+ * exclude each other, a missing prompt — is its own parser's to say (`checkArgs`).
  */
 function argsFor(
   info: AdwInfo, description: AdwDescription, values: LaunchRequest["values"], adwId: string, tracker: string | null,
@@ -180,25 +204,17 @@ function argsFor(
     if (name === "adw_id") throw new HttpError(400, "adw_id is minted by the Console, not set in the form");
     if (!known.has(name)) throw new HttpError(400, `${info.name} has no option ${name}`);
   }
-  for (const group of description.mutually_exclusive) {
-    const set = description.options.filter((o) => o.flag && group.includes(o.flag) && values[o.name] === true);
-    if (set.length > 1) throw new HttpError(400, `${set.map((o) => o.flag).join(" and ")} can't be used together`);
-  }
 
   const value = (o: AdwOption): string | null => {
     const raw = values[o.name];
     if (raw === undefined || raw === "" || raw === false) return null;
     if (typeof raw !== "string") throw new HttpError(400, `${o.name} takes text, not ${JSON.stringify(raw)}`);
-    if (o.kind === "choice" && o.choices && !o.choices.includes(raw)) {
-      throw new HttpError(400, `${o.flag ?? o.name} is one of ${o.choices.join(", ")}, not ${raw}`);
-    }
     return raw;
   };
 
   const positionals: string[] = [];
   for (const o of description.options.filter((option) => option.flag === null)) {
     const v = value(o);
-    if (v === null && o.required) throw new HttpError(400, `${o.name} is required`);
     if (v !== null) positionals.push(v);
   }
   const args: string[] = [];
@@ -313,8 +329,11 @@ function startOfToday(): number {
 
 export class Launches {
   private readonly entries = new Map<string, Tracked>();
-  /** The argv each preview showed, by its minted id: a Launch runs only what was confirmed. */
-  private readonly previewed = new Map<string, string[]>();
+  /**
+   * The argv each preview showed, by its minted id: a Launch runs only what was
+   * confirmed. `checked` when the ADW's `--check-args` took it then, so its Launch isn't asked again.
+   */
+  private readonly previewed = new Map<string, { argv: string[]; checked: boolean }>();
   /**
    * The repo's Tracker, as its last `--list-ready` named it: in a Local Markdown
    * repo a prompt that is a local issue's path names that issue. Null until a
@@ -437,13 +456,19 @@ export class Launches {
 
   /** What a Launch would spawn. Nothing starts; the argv is kept for the Launch to match. */
   async preview(req: LaunchRequest): Promise<LaunchPreview> {
-    const preview = await this.plan(req);
-    this.previewed.set(preview.adw_id, preview.argv);
-    const { issue: _issue, ...shown } = preview;
+    const { issue: _issue, checksArgs, ...shown } = await this.plan(req);
+    if (checksArgs) await checkArgs(this.repoRoot, shown.argv);
+    this.previewed.set(shown.adw_id, { argv: shown.argv, checked: checksArgs });
     return shown;
   }
 
-  private async plan(req: LaunchRequest): Promise<LaunchPreview & { issue: string | null }> {
+  /**
+   * What these values would spawn, and whether the ADW can be asked if it takes
+   * them: one installed before `--check-args` is left to refuse them at Launch.
+   */
+  private async plan(
+    req: LaunchRequest,
+  ): Promise<LaunchPreview & { issue: string | null; checksArgs: boolean }> {
     if (typeof req?.adw !== "string" || typeof req.values !== "object" || req.values === null) {
       throw new HttpError(400, "a launch needs an adw and its values");
     }
@@ -504,7 +529,10 @@ export class Launches {
     if (holder !== undefined) {
       throw new HttpError(409, `${issue} is already being launched as ${holder}: wait until its Run has claimed it`);
     }
-    return { adw_id: adwId, argv, ...commandsFor(argv), issue };
+    return {
+      adw_id: adwId, argv, ...commandsFor(argv), issue,
+      checksArgs: info.description.checks_args === true,
+    };
   }
 
   /**
@@ -513,16 +541,20 @@ export class Launches {
    * down, not launched unseen.
    */
   async start(req: LaunchRequest): Promise<Launch> {
-    const preview = await this.plan(req);
+    const { checksArgs, ...preview } = await this.plan(req);
     const continuing = req.continues !== undefined;
     const rerun = req.reruns !== undefined;
+    let checked = false;
     if (req.adw_id !== undefined || continuing || rerun) {
       const shown = this.previewed.get(preview.adw_id);
-      if (!shown || shown.join("\0") !== preview.argv.join("\0")) {
+      if (!shown || shown.argv.join("\0") !== preview.argv.join("\0")) {
         throw new HttpError(409, "this isn't the command you reviewed: review the new one before launching it");
       }
+      checked = shown.checked;
       this.previewed.delete(preview.adw_id);
     }
+    // A Launch no checked preview showed is asked now, before anything spawns.
+    if (checksArgs && !checked) await checkArgs(this.repoRoot, preview.argv);
     mkdirSync(join(this.sessionsDir, preview.adw_id), { recursive: true });
     const logPath = this.logFile(preview.adw_id);
     // The Run's earlier output stays above; the full log says where this Launch begins.

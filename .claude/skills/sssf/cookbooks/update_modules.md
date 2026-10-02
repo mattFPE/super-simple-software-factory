@@ -20,7 +20,7 @@ Extend `adws/adw_modules/` with new low-level logic.
 | `procs.py` | coding-agent child processes: idle watchdog (`idle_timeout_seconds`), process-tree kill, kill-on-early-exit, wrapped around both adapters' read loops; `pid_alive`; and `stop`, the verified kill of a whole Run by adw_id, which is also its command line (`just kill`, the Console's Stop). A Run killed before it could settle is settled for it through `tracer.py` and `issues.py` |
 | `changes.py` | deterministic change capture: resolve the base ref, `git diff` into `context_handoff/changes.diff`, adapt the `ChangeSet` into an envelope an agent can be handed |
 | `prompts.py` | load system/user prompt refs from config, render placeholders |
-| `session.py` | mint or join `adw_id`, maintain `agent_map.json`, create session dirs incl. `context_handoff/`; the shared CLI flags (`add_cli_args`), including `--describe` |
+| `session.py` | mint or join `adw_id`, maintain `agent_map.json`, create session dirs incl. `context_handoff/`; the shared CLI flags (`add_cli_args`), including `--describe` and `--check-args`; `check_argv`, the post-parse refusals both a Run and `--check-args` make |
 | `tracer.py` | append JSONL **and** insert every event into `sssf.db` as it happens |
 | `console.py` | the terminal narrative — every line printed also lands in the db as a `log` event, so the UI reads the same story; plain sequential lines, no spinners |
 | `console.py` | the rich stdout reporter — every line printed is ALSO traced as a `log` event (`{message, level}`) so the terminal and the swim-lane UI tell the same story |
@@ -30,7 +30,7 @@ Extend `adws/adw_modules/` with new low-level logic.
 
 ## Never `print()`
 
-Modules report through `run.console` — never a bare `print()`. Each console method prints a rich line **and** writes it to `sssf.db` as a `log` event with payload `{message, level}`, both from one `_emit` helper, so the terminal narrative and the swim-lane UI can't drift. New output means a new method on `Console`, not a print at the call site. The exceptions are `--describe`, which prints JSON to stdout before any Run exists, and `procs.py stop`, which stops a Run from another process that has no Run of its own.
+Modules report through `run.console` — never a bare `print()`. Each console method prints a rich line **and** writes it to `sssf.db` as a `log` event with payload `{message, level}`, both from one `_emit` helper, so the terminal narrative and the swim-lane UI can't drift. New output means a new method on `Console`, not a print at the call site. The exceptions are `--describe` and `--check-args`, which print to stdout before any Run exists, and `procs.py stop`, which stops a Run from another process that has no Run of its own.
 
 ## The four-param rule
 

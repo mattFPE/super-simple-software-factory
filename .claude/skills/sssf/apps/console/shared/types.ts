@@ -341,6 +341,8 @@ export interface AdwDescription {
   options: AdwOption[];
   /** Flags of which at most one may be set, e.g. [["--branch", "--merge", "--pr"]]. */
   mutually_exclusive: string[][];
+  /** The ADW answers `--check-args <argv…>`; absent in one installed before it could. */
+  checks_args?: boolean;
 }
 
 export interface AdwInfo {

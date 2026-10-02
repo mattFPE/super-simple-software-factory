@@ -58,7 +58,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", help="inline text or a path to a prompt file")
-    session.add_cli_args(parser)  # --config --adw-id --describe
+    session.add_cli_args(parser)  # --config --adw-id --describe --check-args
     args = parser.parse_args()
     sys.exit(main(utils.resolve_prompt(args.prompt), args.config, args.adw_id))
 '''
