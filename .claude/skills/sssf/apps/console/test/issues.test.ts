@@ -385,7 +385,7 @@ describe("an issue whose latest Run failed", () => {
     expect(preview.status).toBe(200);
     expect(preview.body.adw_id).not.toBe("pr00run0");
     // The Console mints every Run's id, so it follows the outcome comment's command.
-    expect(preview.body.command).toBe(`${outcomeForce("adw_full", 7)} --adw-id ${preview.body.adw_id}`);
+    expect(preview.body.commands.posix).toBe(`${outcomeForce("adw_full", 7)} --adw-id ${preview.body.adw_id}`);
 
     const started = await api<Launch>(r, "/api/launches",
       { adw: "adw_full", values: { prompt: "#7", force: true }, adw_id: preview.body.adw_id });
@@ -406,7 +406,7 @@ describe("an issue whose latest Run failed", () => {
     const preview = await api<LaunchPreview>(r, "/api/launches/preview", rerun);
     expect(preview.status).toBe(200);
     expect(preview.body.adw_id).toBe("fail0run");
-    expect(preview.body.command).toBe(outcomeRerun("adw_full", 8, "fail0run"));
+    expect(preview.body.commands.posix).toBe(outcomeRerun("adw_full", 8, "fail0run"));
 
     const started = await api<Launch>(r, "/api/launches", rerun);
     expect(started.status).toBe(201);
@@ -549,7 +549,7 @@ describe("a Launch from a local Ticket", () => {
     const pick = { adw: "adw_full", values: { prompt: PARTS, merge: true } };
     const preview = await api<LaunchPreview>(r, "/api/launches/preview", pick);
     expect(preview.status).toBe(200);
-    expect(preview.body.command).toBe(`uv run adws/adw_full.py ${PARTS} --merge --adw-id ${preview.body.adw_id}`);
+    expect(preview.body.commands.posix).toBe(`uv run adws/adw_full.py ${PARTS} --merge --adw-id ${preview.body.adw_id}`);
 
     const started = await api<Launch>(r, "/api/launches", { ...pick, adw_id: preview.body.adw_id });
     expect(started.status).toBe(201);

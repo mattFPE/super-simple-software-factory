@@ -397,9 +397,17 @@ export interface LaunchPreview {
   adw_id: string;
   /** Exactly what is spawned, program first. No shell ever sees it. */
   argv: string[];
-  /** The same argv quoted for a POSIX shell, to read or paste into a terminal. */
-  command: string;
+  /**
+   * The same argv quoted for each shell an engineer might paste it into. Null
+   * for PowerShell when an argument is exactly `--%`, which PowerShell drops.
+   */
+  commands: { posix: string; powershell: string | null };
+  /** The shell of the server's own platform, whose command is selected first: PowerShell on Windows. */
+  shell: Shell;
 }
+
+/** posix: sh, bash, zsh, and `just`'s recipes. powershell: PowerShell 7.3 or later. */
+export type Shell = "posix" | "powershell";
 
 /**
  * starting: the process is alive and has no session row yet.

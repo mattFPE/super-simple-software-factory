@@ -4,6 +4,7 @@ import type { Launch } from '../lib/types'
 import { dismissLaunch, fetchLaunchLog } from '../lib/api'
 import { removeLaunch } from '../lib/launches'
 import { messageOf } from '../lib/format'
+import ShellCommand from './ShellCommand.vue'
 
 const props = defineProps<{ launch: Launch }>()
 
@@ -46,7 +47,7 @@ async function toggleLog(): Promise<void> {
       <span class="state">{{ launch.state === 'refused' ? 'Refused' : 'Starting' }}</span>
     </div>
     <span class="card-adw">{{ launch.adw }}</span>
-    <pre class="command">{{ launch.command }}</pre>
+    <ShellCommand :commands="launch.commands" :shell="launch.shell" clamp />
     <template v-if="launch.state === 'refused'">
       <span class="dim">
         {{ launch.adw }} exited{{ launch.exit_code === null ? '' : ` with ${launch.exit_code}` }} before
@@ -122,12 +123,6 @@ async function toggleLog(): Promise<void> {
 .refused .state {
   color: var(--red);
   border-color: rgba(255, 111, 103, 0.45);
-}
-
-.command {
-  white-space: pre-wrap;
-  max-height: 7.5em;
-  overflow-y: auto;
 }
 
 .log {

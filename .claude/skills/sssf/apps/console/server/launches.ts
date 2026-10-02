@@ -25,7 +25,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
-  AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session,
+  AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session, Shell,
 } from "../shared/types.ts";
 import { LOCAL_TRACKER, claimingAdw, issueNamed } from "../shared/issues.ts";
 
@@ -132,6 +132,27 @@ async function runDescribe(repoRoot: string, file: string): Promise<AdwDescripti
 export function shellQuote(arg: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg;
   return /^[A-Za-z0-9_@%+=:,./#-]+$/.test(arg) ? `"${arg}"` : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * PowerShell quoting, for PowerShell 7.3+, which hands a native program each
+ * argument as written, embedded `"` included. Anything but a plain word or
+ * flag name is single-quoted: PowerShell reads `~`, `@`, `$` and `,` as syntax
+ * and splits `-a.b` in two. Inside single quotes only a quote is special, and
+ * PowerShell takes the typographic ones for `'` too, so each is doubled.
+ */
+export function powershellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_./=:+][A-Za-z0-9_./=:+-]*$|^-+([A-Za-z0-9][A-Za-z0-9-]*)?$/.test(arg)) return arg;
+  return `'${arg.replace(/['‘’‚‛]/g, "$&$&")}'`;
+}
+
+/** The shell whose command the confirm step selects first: the one the server's platform runs. */
+const PLATFORM_SHELL: Shell = process.platform === "win32" ? "powershell" : "posix";
+
+/** PowerShell drops an argument that is exactly `--%`, however it is quoted: no command of its passes one. */
+function commandsFor(argv: string[]): Pick<LaunchPreview, "commands" | "shell"> {
+  const powershell = argv.includes("--%") ? null : argv.map(powershellQuote).join(" ");
+  return { commands: { posix: argv.map(shellQuote).join(" "), powershell }, shell: PLATFORM_SHELL };
 }
 
 /**
@@ -350,7 +371,7 @@ export class Launches {
     if (holder !== undefined) {
       throw new HttpError(409, `${issue} is already being launched as ${holder}: wait until its Run has claimed it`);
     }
-    return { adw_id: adwId, argv, command: argv.map(shellQuote).join(" "), issue };
+    return { adw_id: adwId, argv, ...commandsFor(argv), issue };
   }
 
   /**
@@ -373,7 +394,7 @@ export class Launches {
     const logPath = this.logFile(preview.adw_id);
     // The Run's earlier output stays above; the full log says where this Launch begins.
     if (continuing || rerun) {
-      appendFileSync(logPath, `\n[console] ${continuing ? "continuing" : "rerunning"} with ${preview.command}\n`, "utf8");
+      appendFileSync(logPath, `\n[console] ${continuing ? "continuing" : "rerunning"} with ${preview.commands.posix}\n`, "utf8");
     }
     const fd = openSync(logPath, "a");
     const entry: Tracked = {

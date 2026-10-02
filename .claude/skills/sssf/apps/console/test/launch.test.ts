@@ -293,21 +293,75 @@ describe("the confirm step", () => {
     // Options first and the prompt after `--`, so no prompt can be read as a flag.
     expect(body.argv).toEqual(["uv", "run", "adws/adw_ok.py", "--merge", "--depth", "deep",
       "--mood", "sunny", "--adw-id", body.adw_id, "--", "add a health endpoint"]);
-    expect(body.command).toBe(`uv run adws/adw_ok.py --merge --depth deep --mood sunny ` +
-      `--adw-id ${body.adw_id} -- 'add a health endpoint'`);
+    expect(body.commands).toEqual({
+      posix: `uv run adws/adw_ok.py --merge --depth deep --mood sunny --adw-id ${body.adw_id} -- 'add a health endpoint'`,
+      powershell: `uv run adws/adw_ok.py --merge --depth deep --mood sunny --adw-id ${body.adw_id} -- 'add a health endpoint'`,
+    });
     expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);
     expect(existsSync(join(r.root, "adws", "adw_data", "sessions", body.adw_id))).toBe(false);
   });
 
-  test("quotes a prompt full of shell syntax so a shell would read it back unchanged", async () => {
+  test("shows first the command for the shell of the server's own platform", async () => {
     const r = repo();
     await startConsole(r);
-    const { body } = await api<LaunchPreview>(r, "/api/launches/preview", { adw: "adw_ok", values: { prompt: PROMPT } });
-    const quoted = body.command.slice(`uv run adws/adw_ok.py --adw-id ${body.adw_id} -- `.length);
-    const echoed = spawnSync("sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" });
-    if (echoed.error) return;   // no POSIX shell here to check against
-    expect(echoed.stdout).toBe(PROMPT);
+    const { body } = await api<LaunchPreview>(r, "/api/launches/preview", { adw: "adw_ok", values: { prompt: "x" } });
+    expect(body.shell).toBe(process.platform === "win32" ? "powershell" : "posix");
   });
+
+  test("quotes an issue reference, and anything PowerShell would read as more than text, for each shell", async () => {
+    const r = repo();
+    await startConsole(r);
+    const { body } = await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_ok", values: { prompt: "#42", config: "-a.b" } });
+    expect(body.commands).toEqual({
+      posix: `uv run adws/adw_ok.py "#42" --config=-a.b --adw-id ${body.adw_id}`,
+      powershell: `uv run adws/adw_ok.py '#42' '--config=-a.b' --adw-id ${body.adw_id}`,
+    });
+  });
+
+  /**
+   * Each quoting of these, pasted into its shell with an echo program in place
+   * of `uv run adws/adw_ok.py`, must hand that program the argv the Launch spawns.
+   * PowerShell reads its paste from a script file: `-Command` would put Windows
+   * command-line quoting between the paste and the shell.
+   */
+  const PASTES = [PROMPT, "it’s ‘smart’ ‚quoted‛", "-a.b", "~/x", "@splat", "a,b", "$env:PATH", "0x10", "+1", "--%"];
+  const ECHO = "process.stdout.write(encodeURIComponent(JSON.stringify(process.argv.slice(2))));";
+  const SHELLS = [
+    { shell: "posix", program: "sh", call: "", quote: (arg: string) => `'${arg.replace(/'/g, `'\\''`)}'`,
+      run: (dir: string, line: string) => spawnSync("sh", ["-c", line], { cwd: dir, encoding: "utf8" }) },
+    { shell: "powershell", program: "pwsh", call: "& ", quote: (arg: string) => `'${arg.replace(/['‘’‚‛]/g, "$&$&")}'`,
+      run: (dir: string, line: string) => {
+        writeFileSync(join(dir, "paste.ps1"), line, "utf8");
+        return spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", join(dir, "paste.ps1")],
+          { cwd: dir, encoding: "utf8" });
+      } },
+  ] as const;
+  for (const { shell, program, call, quote, run } of SHELLS) {
+    const missing = spawnSync(program, ["-c", "exit 0"]).error !== undefined;
+    test.skipIf(missing)(`quotes prompts full of shell syntax so ${program} reads them back unchanged`, async () => {
+      const r = repo();
+      await startConsole(r);
+      const dir = tempDir();
+      writeFileSync(join(dir, "echo.js"), ECHO, "utf8");
+      const echo = `${call}${quote(process.execPath)} ${quote(join(dir, "echo.js"))}`;
+      for (const prompt of PASTES) {
+        const { body } = await api<LaunchPreview>(r, "/api/launches/preview",
+          { adw: "adw_ok", values: { prompt, config: prompt } });
+        const command = body.commands[shell];
+        // PowerShell drops an argument of exactly `--%`, so it has no command to show for one.
+        if (shell === "powershell" && prompt === "--%") {
+          expect(command).toBeNull();
+          continue;
+        }
+        const ran = "uv run adws/adw_ok.py";
+        expect(command?.startsWith(`${ran} `)).toBe(true);
+        const echoed = run(dir, `${echo}${command!.slice(ran.length)}`);
+        expect(echoed.stderr).toBe("");
+        expect(JSON.parse(decodeURIComponent(echoed.stdout))).toEqual(body.argv.slice(3));
+      }
+    });
+  }
 
   test("turns down options the ADW doesn't take, and more than one landing flag", async () => {
     const r = repo();
@@ -369,7 +423,8 @@ describe("a Launch", () => {
       { adw: "adw_ok", values: { prompt: "x" } })).body;
     const done = await api<Launch>(r, "/api/launches", { adw: "adw_ok", values: { prompt: "x" }, adw_id: preview.adw_id });
     expect(done.body.adw_id).toBe(preview.adw_id);
-    expect(done.body.command).toBe(preview.command);
+    expect(done.body.commands).toEqual(preview.commands);
+    expect(done.body.shell).toBe(preview.shell);
     const again = await api(r, "/api/launches", { adw: "adw_ok", values: { prompt: "x" }, adw_id: preview.adw_id });
     expect(again.status).toBe(409);
   });
@@ -441,7 +496,7 @@ describe("Continue with…", () => {
     expect(status).toBe(200);
     expect(body.adw_id).toBe(runId);
     expect(body.argv).toEqual(["uv", "run", "adws/adw_resume.py", "--adw-id", runId, "--", "build the plan"]);
-    expect(body.command).toBe(`uv run adws/adw_resume.py --adw-id ${runId} -- 'build the plan'`);
+    expect(body.commands.posix).toBe(`uv run adws/adw_resume.py --adw-id ${runId} -- 'build the plan'`);
   });
 
   test("is Starting until the Resuming ADW joins the Run, and its work lands under the same Run", async () => {

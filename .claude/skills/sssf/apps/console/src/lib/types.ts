@@ -33,6 +33,7 @@ export type {
   LaunchPreview,
   LaunchRequest,
   LaunchState,
+  Shell,
   IssueLink,
   IssueListing,
   IssueRerun,

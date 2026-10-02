@@ -7,6 +7,7 @@ import { addLaunch, catalog, continuing, resumingAdws } from '../lib/launches'
 import { messageOf } from '../lib/format'
 import { issues } from '../lib/issues'
 import IssuesPanel from './IssuesPanel.vue'
+import ShellCommand from './ShellCommand.vue'
 
 const LAST_ADW = 'sssf.console.last-adw'
 
@@ -342,7 +343,7 @@ const locked = computed(() => busy.value || preview.value !== null)
 
         <div v-if="preview" class="confirm">
           <span class="label">This will run, from the repo root:</span>
-          <pre class="command">{{ preview.command }}</pre>
+          <ShellCommand :commands="preview.commands" :shell="preview.shell" />
           <div class="actions">
             <button type="button" class="primary" :disabled="busy" @click="confirm">Launch</button>
             <button type="button" :disabled="busy" @click="preview = null">Edit</button>
@@ -480,10 +481,6 @@ input[type='checkbox'] {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.command {
-  color: var(--text);
 }
 
 .actions {
