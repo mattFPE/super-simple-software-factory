@@ -20,7 +20,7 @@ import { join, resolve } from "node:path";
 import type { HealthResponse } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
-const URL_BASE = `http://localhost:${PORT}`;
+const URL_BASE = `http://127.0.0.1:${PORT}`;   // where the server listens
 const APP_DIR = resolve(import.meta.dir, "..");
 const LOG = join(tmpdir(), `sssf-console-${PORT}.log`);
 // Drop "sssf-visualizer" a release after the rename, with HealthResponse.services.

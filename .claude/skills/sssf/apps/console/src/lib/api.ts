@@ -1,9 +1,13 @@
 import type {
+  AdwCatalog,
   Envelope,
   EventRow,
   EventsPage,
   GateResult,
   HealthResponse,
+  Launch,
+  LaunchPreview,
+  LaunchRequest,
   PromptsResponse,
   SessionDetail,
   SessionSummary,
@@ -75,4 +79,40 @@ export function fetchEnvelopes(adwId: string): Promise<Envelope[]> {
 
 export function fetchGates(adwId: string): Promise<GateResult[]> {
   return getJson(`/api/sessions/${encodeURIComponent(adwId)}/gates`) as Promise<GateResult[]>
+}
+
+/** POST JSON; a refusal throws the server's own message, which says what to fix. */
+async function postJson(url: string, body: unknown): Promise<unknown> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = (await res.json().catch(() => ({}))) as { error?: string }
+  if (!res.ok) throw new Error(data.error ?? `POST ${url} → ${res.status}`)
+  return data
+}
+
+export function fetchAdws(): Promise<AdwCatalog> {
+  return getJson('/api/adws') as Promise<AdwCatalog>
+}
+
+export function previewLaunch(req: LaunchRequest): Promise<LaunchPreview> {
+  return postJson('/api/launches/preview', req) as Promise<LaunchPreview>
+}
+
+export function startLaunch(req: LaunchRequest): Promise<Launch> {
+  return postJson('/api/launches', req) as Promise<Launch>
+}
+
+export function fetchLaunches(): Promise<Launch[]> {
+  return getJson('/api/launches') as Promise<Launch[]>
+}
+
+export async function fetchLaunchLog(adwId: string): Promise<string> {
+  const url = `/api/launches/${encodeURIComponent(adwId)}/log`
+  const res = await fetch(url)
+  if (res.status === 404) return ''
+  if (!res.ok) throw new Error(`GET ${url} → ${res.status}`)
+  return res.text()
 }

@@ -1,0 +1,372 @@
+/**
+ * Launching a Run from a typed prompt, through the server's HTTP API alone (#9).
+ *
+ * A throwaway git repo whose adws/ holds stub ADWs, each spawned for real with
+ * `uv run`: adw_ok writes its session row (its request is the argv it was
+ * given) and then waits, adw_refuse exits before writing any, adw_hang never
+ * writes one. The stubs that wait keep going while the repo's `hold` file
+ * exists, so a test decides when they finish.
+ *
+ *   bun test
+ */
+import { Database } from "bun:sqlite";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
+import { join, resolve } from "node:path";
+import type { AdwCatalog, Launch, LaunchPreview, SessionDetail } from "../shared/types.ts";
+import { APP_DIR, health, onCleanup, port as nextPort, serve, stop, tempDir, until } from "./support.ts";
+
+setDefaultTimeout(60_000);
+
+const TRACER = resolve(APP_DIR, "..", "..", "templates", "adws", "adw_modules", "tracer.py");
+const PROMPT = `it's "#42" — $(rm -rf ~) & echo pwned | x; \`y\` %PATH% ^& \\"\nsecond line\n`;
+
+const SHARED = [
+  { name: "prompt", flag: null, kind: "value", help: "what to do", default: null, choices: null, required: true },
+  { name: "config", flag: "--config", kind: "value", help: null,
+    default: "adws/adw_sssf_config/sssf.config.yaml", choices: null, required: false },
+  { name: "adw_id", flag: "--adw-id", kind: "value", help: "join a Run", default: null, choices: null, required: false },
+];
+const LANDING = ["branch", "merge", "pr"].map((name) => ({
+  name, flag: `--${name}`, kind: "flag", help: `land with --${name}`, default: false, choices: null, required: false,
+}));
+
+const DESCRIBE_OK = {
+  commits: true, resumes: false, mutually_exclusive: [["--branch", "--merge", "--pr"]],
+  options: [...SHARED, ...LANDING,
+    { name: "depth", flag: "--depth", kind: "choice", help: null, default: "shallow",
+      choices: ["shallow", "deep"], required: false },
+    { name: "mood", flag: "--mood", kind: "vibe", help: "a kind the Console has never seen",
+      default: null, choices: null, required: false }],
+};
+const DESCRIBE_PLAIN = { commits: false, resumes: false, mutually_exclusive: [], options: SHARED };
+
+/** The stubs' shared head: --describe, the minted id, the row, the hold. */
+const COMMON = `
+import json, os, sqlite3, sys, time
+from datetime import datetime, timezone
+
+def describe(d):
+    if "--describe" in sys.argv:
+        print(json.dumps(d))
+        sys.exit(0)
+
+def adw_id():
+    return sys.argv[sys.argv.index("--adw-id") + 1]
+
+def held():
+    end = time.time() + 60
+    while os.path.exists("hold") and time.time() < end:
+        time.sleep(0.1)
+
+def db():
+    return sqlite3.connect("adws/adw_data/sssf.db", timeout=10)
+`;
+
+function stub(doc: string, describe: object | null, body: string): string {
+  const head = describe ? `describe(json.loads(${JSON.stringify(JSON.stringify(describe))}))\n` : "";
+  return `"""${doc}"""\n${COMMON}\n${head}${body}`;
+}
+
+const STUBS: Record<string, string> = {
+  "adw_ok.py": stub(
+    "ADW OK — writes its session row, then waits for the hold.\n\n" +
+      "Phases: engineer(request) -> builder\n        -> git(commit)\n",
+    DESCRIBE_OK,
+    `
+print("starting", adw_id(), flush=True)
+with db() as c:
+    c.execute("INSERT INTO sessions (adw_id, adw_name, request, status, engineer, started_at)"
+              " VALUES (?, 'adw_ok', ?, 'running', 'stub', ?)",
+              (adw_id(), json.dumps(sys.argv[1:]), datetime.now(timezone.utc).isoformat()))
+held()
+with db() as c:
+    c.execute("UPDATE sessions SET status = 'success' WHERE adw_id = ?", (adw_id(),))
+`),
+  "adw_refuse.py": stub(
+    "ADW Refuse — turns every request down before it starts.\n\nPhases: engineer(request) -> builder\n",
+    DESCRIBE_PLAIN,
+    `
+for n in range(1, 41):
+    print(f"preflight line {n}")
+print("agents.validate: no 'builder' agent in sssf.config.yaml", file=sys.stderr)
+sys.exit(3)
+`),
+  "adw_hang.py": stub(
+    "ADW Hang — never gets as far as a session row.\n\nPhases: engineer(request) -> scout\n",
+    DESCRIBE_PLAIN,
+    `
+print("resolving dependencies...", flush=True)
+held()
+`),
+  "adw_resume.py": stub(
+    "ADW Resume — continues an earlier Run.\n\nPhases: builder\n",
+    { ...DESCRIBE_PLAIN, resumes: true },
+    "sys.exit(0)\n"),
+};
+
+/** An ADW from before --describe: argparse turns the unknown flag down. */
+const OLD_ADW = `"""ADW Old — from before --describe.\n\nPhases: engineer(request) -> builder\n"""
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("prompt")
+parser.add_argument("--adw-id")
+parser.parse_args()
+`;
+
+interface Repo { root: string; db: string; port: number }
+
+/** A git repo with the stubs in adws/ and an empty trace db the real tracer's schema built. */
+function repo(adws: Record<string, string> = STUBS): Repo {
+  const root = tempDir();
+  spawnSync("git", ["init", "-q"], { cwd: root });
+  mkdirSync(join(root, "adws", "adw_data"), { recursive: true });
+  for (const [name, source] of Object.entries(adws)) writeFileSync(join(root, "adws", name), source, "utf8");
+  const schema = /SCHEMA = """([\s\S]*?)"""/.exec(readFileSync(TRACER, "utf8"))![1]!;
+  const path = join(root, "adws", "adw_data", "sssf.db");
+  const db = new Database(path);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(schema);
+  db.close();
+  hold(root);
+  onCleanup(() => rmSync(join(root, "hold"), { force: true }));
+  return { root, db: path, port: nextPort() };
+}
+
+function hold(root: string): void {
+  writeFileSync(join(root, "hold"), "", "utf8");
+}
+
+function release(root: string): void {
+  rmSync(join(root, "hold"), { force: true });
+}
+
+function startConsole(r: Repo) {
+  return serve([join("server", "index.ts"), "--db", r.db], r.port);
+}
+
+async function api<T>(r: Repo, path: string, body?: unknown): Promise<{ status: number; body: T }> {
+  const res = await fetch(`http://127.0.0.1:${r.port}${path}`, body === undefined ? {} : {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  const text = (await res.text()).replace(/\r\n/g, "\n");   // a log written on Windows
+  let parsed: unknown = text;
+  try { parsed = JSON.parse(text); } catch { /* a log is text */ }
+  return { status: res.status, body: parsed as T };
+}
+
+async function launch(r: Repo, adw: string, values: Record<string, string | boolean>): Promise<Launch> {
+  const done = await api<Launch>(r, "/api/launches", { adw, values });
+  expect(done.status).toBe(201);
+  return done.body;
+}
+
+async function launchState(r: Repo, adwId: string): Promise<Launch | undefined> {
+  return (await api<Launch[]>(r, "/api/launches")).body.find((l) => l.adw_id === adwId);
+}
+
+async function settlesAs(r: Repo, adwId: string, state: Launch["state"]): Promise<Launch> {
+  expect(await until(async () => (await launchState(r, adwId))?.state === state, 30)).toBe(true);
+  return (await launchState(r, adwId))!;
+}
+
+describe("the ADW catalog", () => {
+  test("lists every adw_*.py with its summary, phases and --describe output", async () => {
+    const r = repo();
+    await startConsole(r);
+    const { body } = await api<AdwCatalog>(r, "/api/adws");
+    expect(body.read_only).toBe(false);
+    expect(body.adws.map((a) => a.name)).toEqual(["adw_hang", "adw_ok", "adw_refuse", "adw_resume"]);
+    const ok = body.adws.find((a) => a.name === "adw_ok")!;
+    expect(ok.file).toBe("adws/adw_ok.py");
+    expect(ok.summary).toBe("ADW OK — writes its session row, then waits for the hold.");
+    expect(ok.phases).toBe("engineer(request) -> builder -> git(commit)");
+    expect(ok.description).toEqual(DESCRIBE_OK);
+    expect(body.adws.find((a) => a.name === "adw_resume")!.description!.resumes).toBe(true);
+  });
+
+  test("an ADW the engineer adds later shows up, script header and CRLF line endings and all", async () => {
+    const r = repo();
+    await startConsole(r);
+    const header = "#!/usr/bin/env -S uv run\n# /// script\n# dependencies = []\n# ///\n";
+    const source = header + stub("ADW Mine — my own chain.\n\nPhases: engineer(request) -> me\n", DESCRIBE_PLAIN, "");
+    writeFileSync(join(r.root, "adws", "adw_mine.py"), source.replace(/\n/g, "\r\n"), "utf8");
+    const mine = (await api<AdwCatalog>(r, "/api/adws")).body.adws.find((a) => a.name === "adw_mine");
+    expect(mine?.summary).toBe("ADW Mine — my own chain.");
+    expect(mine?.phases).toBe("engineer(request) -> me");
+    expect(mine?.description).toEqual(DESCRIBE_PLAIN);
+  });
+
+  test("an ADW whose --describe breaks is shown with its error, and doesn't make the repo read-only", async () => {
+    const r = repo({ ...STUBS, "adw_broken.py": `"""ADW Broken - crashes."""\nraise RuntimeError("boom")\n` });
+    await startConsole(r);
+    const { body } = await api<AdwCatalog>(r, "/api/adws");
+    expect(body.read_only).toBe(false);
+    const broken = body.adws.find((a) => a.name === "adw_broken")!;
+    expect(broken.description).toBeNull();
+    expect(broken.error).toContain("boom");
+  });
+
+  test("a repo whose ADWs predate --describe is read-only", async () => {
+    const r = repo({ "adw_old.py": OLD_ADW });
+    await startConsole(r);
+    const { body } = await api<AdwCatalog>(r, "/api/adws");
+    expect(body.read_only).toBe(true);
+    expect(body.adws[0]!.description).toBeNull();
+    expect(body.adws[0]!.error).toBeTruthy();
+    const refused = await api(r, "/api/launches", { adw: "adw_old", values: { prompt: "x" } });
+    expect(refused.status).toBe(409);
+  });
+});
+
+describe("the confirm step", () => {
+  test("previews the exact argv and uv run command, and starts nothing", async () => {
+    const r = repo();
+    await startConsole(r);
+    const { status, body } = await api<LaunchPreview>(r, "/api/launches/preview", {
+      adw: "adw_ok", values: { prompt: "add a health endpoint", merge: true, depth: "deep", mood: "sunny" },
+    });
+    expect(status).toBe(200);
+    expect(body.adw_id).toMatch(/^[0-9a-f]{8}$/);
+    // Options first and the prompt after `--`, so no prompt can be read as a flag.
+    expect(body.argv).toEqual(["uv", "run", "adws/adw_ok.py", "--merge", "--depth", "deep",
+      "--mood", "sunny", "--adw-id", body.adw_id, "--", "add a health endpoint"]);
+    expect(body.command).toBe(`uv run adws/adw_ok.py --merge --depth deep --mood sunny ` +
+      `--adw-id ${body.adw_id} -- 'add a health endpoint'`);
+    expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);
+    expect(existsSync(join(r.root, "adws", "adw_data", "sessions", body.adw_id))).toBe(false);
+  });
+
+  test("quotes a prompt full of shell syntax so a shell would read it back unchanged", async () => {
+    const r = repo();
+    await startConsole(r);
+    const { body } = await api<LaunchPreview>(r, "/api/launches/preview", { adw: "adw_ok", values: { prompt: PROMPT } });
+    const quoted = body.command.slice(`uv run adws/adw_ok.py --adw-id ${body.adw_id} -- `.length);
+    const echoed = spawnSync("sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" });
+    if (echoed.error) return;   // no POSIX shell here to check against
+    expect(echoed.stdout).toBe(PROMPT);
+  });
+
+  test("turns down options the ADW doesn't take, and more than one landing flag", async () => {
+    const r = repo();
+    await startConsole(r);
+    const cases: [Record<string, string | boolean>, string][] = [
+      [{ prompt: "x", nope: true }, "nope"],
+      [{ prompt: "x", merge: true, pr: true }, "--merge"],
+      [{ prompt: "x", depth: "sideways" }, "sideways"],
+      [{ prompt: "" }, "prompt"],
+      [{ prompt: "x", adw_id: "beefbeef" }, "adw_id"],
+    ];
+    for (const [values, named] of cases) {
+      const done = await api<{ error: string }>(r, "/api/launches/preview", { adw: "adw_ok", values });
+      expect(done.status).toBe(400);
+      expect(done.body.error).toContain(named);
+    }
+    expect((await api(r, "/api/launches/preview", { adw: "adw_resume", values: { prompt: "x" } })).status).toBe(400);
+    expect((await api(r, "/api/launches/preview", { adw: "adw_nope", values: { prompt: "x" } })).status).toBe(404);
+  });
+});
+
+describe("a Launch", () => {
+  test("becomes its Run once the session row appears, with the prompt as one argument, unchanged", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: PROMPT, merge: true });
+    expect(started.state).toBe("starting");
+    expect(started.adw).toBe("adw_ok");
+    await settlesAs(r, started.adw_id, "started");
+    const { body } = await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`);
+    expect(JSON.parse(body.session.request!)).toEqual(["--merge", "--adw-id", started.adw_id, "--", PROMPT]);
+  });
+
+  test("passes a prompt or value that looks like a flag as text, never as an option", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: "--help", mood: "-v" });
+    await settlesAs(r, started.adw_id, "started");
+    const { body } = await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`);
+    expect(JSON.parse(body.session.request!)).toEqual(["--mood=-v", "--adw-id", started.adw_id, "--", "--help"]);
+  });
+
+  test("launches only the command its preview showed", async () => {
+    const r = repo();
+    await startConsole(r);
+    const preview = (await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_ok", values: { prompt: "what I reviewed" } })).body;
+    const changed = await api<{ error: string }>(r, "/api/launches",
+      { adw: "adw_ok", values: { prompt: "something else", merge: true }, adw_id: preview.adw_id });
+    expect(changed.status).toBe(409);
+    expect(changed.body.error).toContain("review");
+    expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);
+  });
+
+  test("uses the id its preview minted", async () => {
+    const r = repo();
+    await startConsole(r);
+    const preview = (await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_ok", values: { prompt: "x" } })).body;
+    const done = await api<Launch>(r, "/api/launches", { adw: "adw_ok", values: { prompt: "x" }, adw_id: preview.adw_id });
+    expect(done.body.adw_id).toBe(preview.adw_id);
+    expect(done.body.command).toBe(preview.command);
+    const again = await api(r, "/api/launches", { adw: "adw_ok", values: { prompt: "x" }, adw_id: preview.adw_id });
+    expect(again.status).toBe(409);
+  });
+
+  test("is Starting while its process is alive and has no session row", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_hang", { prompt: "look around" });
+    expect(await until(async () =>
+      (await api<string>(r, `/api/launches/${started.adw_id}/log`)).body.includes("resolving dependencies"), 30)).toBe(true);
+    expect((await launchState(r, started.adw_id))?.state).toBe("starting");
+    release(r.root);
+    const refused = await settlesAs(r, started.adw_id, "refused");
+    expect(refused.exit_code).toBe(0);
+  });
+
+  test("that exits with no session row is Refused, with the ADW's own message", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_refuse", { prompt: "anything" });
+    const refused = await settlesAs(r, started.adw_id, "refused");
+    expect(refused.exit_code).toBe(3);
+    expect(refused.log_tail).toContain("no 'builder' agent in sssf.config.yaml");
+    expect(refused.log_tail).not.toContain("preflight line 1\n");
+    const log = await api<string>(r, `/api/launches/${started.adw_id}/log`);
+    expect(log.status).toBe(200);
+    expect(log.body).toContain("preflight line 1\n");
+    expect(log.body).toContain("no 'builder' agent");
+    expect(existsSync(join(r.root, "adws", "adw_data", "sessions", started.adw_id, "console.log"))).toBe(true);
+  });
+
+  test("keeps running when the Console stops, and shows up again through its session row", async () => {
+    const r = repo();
+    const first = await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: "outlive me" });
+    await settlesAs(r, started.adw_id, "started");
+    await stop(first);
+    expect(await health(r.port)).toBeNull();
+
+    await startConsole(r);
+    expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);   // Launches are memory only
+    const status = async () => (await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`)).body.session?.status;
+    expect(await status()).toBe("running");
+    release(r.root);
+    // Only a process that outlived the first server can still finish its Run.
+    expect(await until(async () => (await status()) === "success", 30)).toBe(true);
+    expect((await api<string>(r, `/api/launches/${started.adw_id}/log`)).body).toContain("starting");
+  });
+});
+
+describe("the server", () => {
+  test("listens on 127.0.0.1 only", async () => {
+    const r = repo();
+    await startConsole(r);
+    expect(await health(r.port, "127.0.0.1")).not.toBeNull();
+    const lan = Object.values(networkInterfaces()).flat()
+      .find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+    if (lan) expect(await health(r.port, lan)).toBeNull();
+  });
+});

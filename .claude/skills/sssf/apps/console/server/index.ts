@@ -1,19 +1,24 @@
 /**
  * SSSF Console server — JSON API over a target repo's sssf.db, plus the
- * built UI when ./dist exists. Reads are read-only; the single write is
+ * built UI when ./dist exists. Its one db write is
  * POST /api/sessions/:adw_id/archive, which sets one review flag on a row.
  *
+ * It also launches ADWs (server/launches.ts). A Launch spawns the ADW, and the
+ * ADW's own tracer writes the trace; the Console only reads it back (ADR 0001).
+ *
  * There is no ingest endpoint and no websocket. The data path is
- * agents → sqlite → web ui, and the UI gets there by polling.
+ * agents → sqlite → web ui, and the UI gets there by polling. It listens on
+ * 127.0.0.1 only: there is no auth, and a Launch runs code.
  *
  *   bun run server/index.ts
- *   bun run server/index.ts --db /path/to/repo/adws/adw_data/sssf.db
+ *   bun run server/index.ts --db /path/to/repo/adws/adw_data/sssf.db [--repo /path/to/repo]
  *   SSSF_DB=/path/to/sssf.db PORT=4600 bun run server/index.ts
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { SssfDb, resolveDbPath } from "./db.ts";
-import type { AgentPrompts, ApiError, HealthResponse } from "../shared/types.ts";
+import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
+import type { AgentPrompts, ApiError, HealthResponse, LaunchRequest } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
 const DIST_DIR = resolve(import.meta.dir, "..", "dist");
@@ -26,6 +31,8 @@ try {
   console.error(`[sssf] ${(error as Error).message}`);
   process.exit(1);
 }
+const launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir,
+  (adwId) => db.session(adwId) !== null);
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -49,6 +56,9 @@ function safely(
     try {
       return await handler(req);
     } catch (error) {
+      if (error instanceof HttpError) {
+        return json({ error: error.message } satisfies ApiError, error.status);
+      }
       console.error(`[sssf] ${req.method} ${new URL(req.url).pathname}:`, error);
       return json({ error: (error as Error).message } satisfies ApiError, 500);
     }
@@ -112,8 +122,15 @@ async function serveStatic(req: Request): Promise<Response> {
   return notFound("not found");
 }
 
+async function launchRequest(req: Request): Promise<LaunchRequest> {
+  const body = await req.json().catch(() => null);
+  if (typeof body !== "object" || body === null) throw new HttpError(400, "expected a JSON body");
+  return body as LaunchRequest;
+}
+
 const server = Bun.serve({
   port: PORT,
+  hostname: "127.0.0.1",
   routes: {
     "/api/health": safely(
       () =>
@@ -127,6 +144,29 @@ const server = Bun.serve({
           sessions: db.sessionCount(),
         } satisfies HealthResponse),
     ),
+
+    // The repo's ADWs, each with the command line its --describe reports.
+    "/api/adws": safely(async () => json(await launches.catalog())),
+
+    "/api/launches": {
+      GET: safely(() => json(launches.list())),
+      POST: safely(async (req) => json(await launches.start(await launchRequest(req)), 201)),
+    },
+
+    // The confirm step: the argv and command a Launch would run. Starts nothing.
+    "/api/launches/preview": {
+      POST: safely(async (req) => json(await launches.preview(await launchRequest(req)))),
+    },
+
+    // Everything the ADW printed: for a Refused Launch, the only record there is.
+    "/api/launches/:adw_id/log": safely((req) => {
+      const path = launches.logPath(param(req, "adw_id"));
+      return path
+        ? new Response(Bun.file(path), {
+            headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+          })
+        : notFound(`no launch log for ${param(req, "adw_id")}`);
+    }),
 
     "/api/sessions": safely((req) => json(db.sessions(intQuery(req, "limit", 200)))),
 
@@ -203,8 +243,9 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[sssf] Console api     http://localhost:${server.port}`);
+console.log(`[sssf] Console api     http://127.0.0.1:${server.port}`);
 console.log(`[sssf] db              ${db.path}  [journal_mode=${db.journalMode}]`);
+console.log(`[sssf] repo            ${launches.repoRoot}`);
 console.log(
   existsSync(DIST_DIR)
     ? `[sssf] serving ui from  ${DIST_DIR}`

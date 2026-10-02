@@ -1,0 +1,131 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+import type { Launch } from '../lib/types'
+import { fetchLaunchLog } from '../lib/api'
+import { messageOf } from '../lib/format'
+
+const props = defineProps<{ launch: Launch }>()
+
+const log = ref<string | null>(null)
+const logError = ref<string | null>(null)
+
+async function toggleLog(): Promise<void> {
+  if (log.value !== null) {
+    log.value = null
+    return
+  }
+  try {
+    log.value = (await fetchLaunchLog(props.launch.adw_id)) || '(nothing printed yet)'
+    logError.value = null
+  } catch (err) {
+    logError.value = messageOf(err)
+  }
+}
+</script>
+
+<template>
+  <article class="launch-card" :class="launch.state">
+    <div class="head">
+      <span class="card-id">{{ launch.adw_id }}</span>
+      <span class="state">{{ launch.state === 'refused' ? 'Refused' : 'Starting' }}</span>
+    </div>
+    <span class="card-adw">{{ launch.adw }}</span>
+    <pre class="command">{{ launch.command }}</pre>
+    <template v-if="launch.state === 'refused'">
+      <span class="dim">
+        {{ launch.adw }} exited{{ launch.exit_code === null ? '' : ` with ${launch.exit_code}` }} before
+        its Run began:
+      </span>
+      <pre class="tail">{{ launch.log_tail || '(it printed nothing)' }}</pre>
+    </template>
+    <span v-else class="dim">waiting for the Run to appear in the trace…</span>
+    <div>
+      <button type="button" @click="toggleLog">{{ log === null ? 'Show full log' : 'Hide log' }}</button>
+    </div>
+    <div v-if="logError" class="error-text">{{ logError }}</div>
+    <pre v-if="log !== null" class="log">{{ log }}</pre>
+  </article>
+</template>
+
+<style scoped>
+.launch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 22px;
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.launch-card.starting {
+  border-color: rgba(108, 182, 255, 0.6);
+  border-style: dashed;
+}
+
+.launch-card.refused {
+  border-color: rgba(255, 111, 103, 0.6);
+}
+
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.card-id {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--purple);
+}
+
+.card-adw {
+  font-family: var(--mono);
+  color: var(--cyan);
+}
+
+.state {
+  padding: 3px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.starting .state {
+  color: var(--blue);
+  border-color: rgba(108, 182, 255, 0.45);
+}
+
+.refused .state {
+  color: var(--red);
+  border-color: rgba(255, 111, 103, 0.45);
+}
+
+.command {
+  white-space: pre-wrap;
+  max-height: 7.5em;
+  overflow-y: auto;
+}
+
+.log {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.error-text {
+  color: var(--red);
+}
+</style>

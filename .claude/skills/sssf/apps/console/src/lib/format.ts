@@ -90,3 +90,8 @@ export function prettyJson(raw: string | null | undefined): string {
     return raw
   }
 }
+
+/** A caught value as text for an error line. */
+export function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}

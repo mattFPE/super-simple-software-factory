@@ -313,3 +313,87 @@ export interface HealthResponse {
 export interface ApiError {
   error: string;
 }
+
+// ── Launching ────────────────────────────────────────────────────────────────
+
+/** One option of an ADW's command line, as its `--describe` prints it. */
+export interface AdwOption {
+  /** argparse dest, the key a launch request's `values` uses. */
+  name: string;
+  /** `--merge`; null for a positional such as the prompt. */
+  flag: string | null;
+  /** "flag" | "value" | "choice"; anything else renders as a text field. */
+  kind: string;
+  help: string | null;
+  default: unknown;
+  choices: string[] | null;
+  required: boolean;
+}
+
+/** `uv run adws/<adw>.py --describe`. */
+export interface AdwDescription {
+  commits: boolean;
+  /** A Resuming ADW continues an earlier Run, so it is never a fresh Launch. */
+  resumes: boolean;
+  options: AdwOption[];
+  /** Flags of which at most one may be set, e.g. [["--branch", "--merge", "--pr"]]. */
+  mutually_exclusive: string[][];
+}
+
+export interface AdwInfo {
+  /** Script stem, e.g. "adw_plan_build". */
+  name: string;
+  /** Repo-relative, e.g. "adws/adw_plan_build.py". */
+  file: string;
+  /** First line of the docstring. */
+  summary: string;
+  /** The docstring's `Phases:` line, continuation lines joined. */
+  phases: string | null;
+  /** Null when `--describe` failed; `error` says how. */
+  description: AdwDescription | null;
+  error: string | null;
+  /** `--describe` was turned down as an unknown flag: the ADW is from before it existed. */
+  predates_describe: boolean;
+}
+
+/** GET /api/adws */
+export interface AdwCatalog {
+  adws: AdwInfo[];
+  /** Every ADW here predates `--describe`, so nothing can launch until the repo updates sssf. */
+  read_only: boolean;
+}
+
+/** POST /api/launches/preview and POST /api/launches */
+export interface LaunchRequest {
+  adw: string;
+  /** Keyed by AdwOption.name: text for values and choices, booleans for flags. */
+  values: Record<string, string | boolean>;
+  /** The id a preview minted; omitted, the launch mints one. */
+  adw_id?: string;
+}
+
+/** POST /api/launches/preview: what would run, so the engineer can confirm it. */
+export interface LaunchPreview {
+  adw_id: string;
+  /** Exactly what is spawned, program first. No shell ever sees it. */
+  argv: string[];
+  /** The same argv quoted for a POSIX shell, to read or paste into a terminal. */
+  command: string;
+}
+
+/**
+ * starting: the process is alive and has no session row yet.
+ * refused: the process exited without ever writing one.
+ * started: its session row exists, so it is an ordinary Run.
+ */
+export type LaunchState = "starting" | "refused" | "started";
+
+/** GET /api/launches: the Launches this server started, newest first. In memory only. */
+export interface Launch extends LaunchPreview {
+  adw: string;
+  state: LaunchState;
+  started_at: string;
+  exit_code: number | null;
+  /** The last lines of the launch log: for a refused Launch, the ADW's own message. */
+  log_tail: string;
+}
