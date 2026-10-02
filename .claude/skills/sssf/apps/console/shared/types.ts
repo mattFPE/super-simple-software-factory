@@ -255,6 +255,8 @@ export interface SessionDetail {
    * its agent_start event (coding_agent is null until it finishes).
    */
   agents: AgentSession[];
+  /** A console.log sits in the Run's session dir (it was launched from the Console), so GET /api/launches/:adw_id/log has everything it printed. */
+  has_console_log: boolean;
 }
 
 /**

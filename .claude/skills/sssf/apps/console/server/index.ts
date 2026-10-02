@@ -26,7 +26,7 @@ import { TraceDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
 import { listReady } from "./issues.ts";
 import { stillRunning, stopRun } from "./stop.ts";
-import type { AgentPrompts, ApiError, HealthResponse, IssueListing, LaunchRequest } from "../shared/types.ts";
+import type { AgentPrompts, ApiError, HealthResponse, IssueListing, LaunchRequest, SessionDetail } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
 const DIST_DIR = resolve(import.meta.dir, "..", "dist");
@@ -203,8 +203,11 @@ const server = Bun.serve({
     "/api/sessions": safely((req) => json(trace.read((db) => db.sessions(intQuery(req, "limit", 200)), []))),
 
     "/api/sessions/:adw_id": safely((req) => {
-      const detail = trace.read((db) => db.sessionDetail(param(req, "adw_id")), null);
-      return detail ? json(detail) : notFound(`no session ${param(req, "adw_id")}`);
+      const adwId = param(req, "adw_id");
+      const detail = trace.read((db) => db.sessionDetail(adwId), null);
+      return detail
+        ? json({ ...detail, has_console_log: launches.logPath(adwId) !== null } satisfies SessionDetail)
+        : notFound(`no session ${adwId}`);
     }),
 
     // The one write. Archiving is review triage — it belongs to the reader, not

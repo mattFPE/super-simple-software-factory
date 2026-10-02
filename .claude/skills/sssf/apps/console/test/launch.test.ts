@@ -595,6 +595,21 @@ describe("a Launch", () => {
     expect(await until(async () => (await status()) === "success", 30)).toBe(true);
     expect((await api<string>(r, `/api/launches/${started.adw_id}/log`)).body).toContain("starting");
   });
+
+  test("leaves its console output reachable from its Run, which a terminal Run has none of", async () => {
+    const r = repo();
+    await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: "print things" });
+    await settlesAs(r, started.adw_id, "started");
+    const detail = async (adwId: string) => (await api<SessionDetail>(r, `/api/sessions/${adwId}`)).body;
+    expect((await detail(started.adw_id)).has_console_log).toBe(true);
+
+    const db = new Database(r.db);
+    db.run("INSERT INTO sessions (adw_id, adw_name, request, status, engineer, started_at)"
+      + " VALUES ('term0001', 'adw_ok', 'from a terminal', 'success', 'stub', ?)", [new Date().toISOString()]);
+    db.close();
+    expect((await detail("term0001")).has_console_log).toBe(false);
+  });
 });
 
 describe("Continue with…", () => {

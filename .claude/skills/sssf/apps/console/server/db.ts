@@ -455,7 +455,7 @@ export class SssfDb {
   }
 
   /** Session + phases + agents in one shot — L2 needs all three to draw lanes. */
-  sessionDetail(adwId: string): SessionDetail | null {
+  sessionDetail(adwId: string): Omit<SessionDetail, "has_console_log"> | null {
     const session = this.session(adwId);
     if (!session) return null;
 

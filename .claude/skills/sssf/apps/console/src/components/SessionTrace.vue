@@ -12,8 +12,8 @@ import type {
   SessionUsage,
 } from '../lib/types'
 import { Bot, SquareTerminal, UserRound } from 'lucide-vue-next'
-import { fetchEnvelopes, fetchEvents, fetchGates, fetchSession } from '../lib/api'
-import { axisTicks, fmtDate, payloadOk, ts } from '../lib/format'
+import { fetchEnvelopes, fetchEvents, fetchGates, fetchLaunchLog, fetchSession } from '../lib/api'
+import { axisTicks, fmtDate, messageOf, payloadOk, ts } from '../lib/format'
 import { modelIcon, modelName } from '../lib/models'
 import { agentColor, hexAlpha, parseAgentStart } from '../lib/events'
 import { navigate, phaseCrumb } from '../lib/router'
@@ -32,10 +32,14 @@ const envelopes = ref<Envelope[]>([])
 const gates = ref<GateResult[]>([])
 const apiError = ref<string | null>(null)
 const loaded = ref(false)
+const consoleLog = ref(false)
+const log = ref<string | null>(null)
+const logError = ref<string | null>(null)
 const nowMs = ref(Date.now())
 
 let cursor = 0
 let inflight = false
+let wasRunning = false
 let timer: ReturnType<typeof setInterval> | undefined
 
 const SIDE_TABLE_TYPES = new Set(['gate_pass', 'gate_fail', 'handoff', 'agent_end', 'phase_end', 'error'])
@@ -49,6 +53,11 @@ async function tick() {
     phases.value = detail.phases.toSorted((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     agents.value = detail.agents
     usage.value = detail.usage
+    consoleLog.value = detail.has_console_log
+    // One more read on the tick a Run settles, for what it printed as it finished.
+    const running = detail.session.status === 'running'
+    if (log.value !== null && (running || wasRunning)) await loadLog()
+    wasRunning = running
 
     const fresh: EventRow[] = []
     let page
@@ -421,6 +430,21 @@ const sessionDurationMs = computed(() => {
   return (Number.isFinite(end) ? end : nowMs.value) - start
 })
 
+/** Everything a Console-launched Run printed, including what the trace never saw. */
+async function loadLog() {
+  try {
+    log.value = (await fetchLaunchLog(props.adwId)) || '(nothing printed yet)'
+    logError.value = null
+  } catch (err) {
+    logError.value = messageOf(err)
+  }
+}
+
+function toggleLog() {
+  if (log.value === null) void loadLog()
+  else log.value = null
+}
+
 function selectPhase(p: Phase) {
   navigate(props.adwId, p.phase_id === props.phaseId ? null : p.phase_id)
 }
@@ -441,7 +465,12 @@ function selectPhase(p: Phase) {
         <StatChip kind="read" :value="usage.read" />
         <StatChip kind="written" :value="usage.written" />
       </span>
+      <button v-if="consoleLog" type="button" class="log-toggle" @click="toggleLog">
+        {{ log === null ? 'Show full log' : 'Hide log' }}
+      </button>
     </div>
+    <div v-if="logError" class="error-text">{{ logError }}</div>
+    <pre v-if="log !== null" class="console-log">{{ log }}</pre>
 
     <div v-if="phases.length" class="waterfall">
       <div class="row axis-row">
@@ -584,6 +613,28 @@ function selectPhase(p: Phase) {
   display: inline-flex;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.log-toggle {
+  margin-left: auto;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.console-log {
+  margin: 20px 28px 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.error-text {
+  margin: 12px 28px 0;
+  color: var(--red);
 }
 
 .waterfall {

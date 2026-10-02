@@ -32,6 +32,7 @@ export async function fetchSession(adwId: string): Promise<SessionDetail> {
     usage: detail.usage ?? { read: 0, written: 0 },
     phases: detail.phases ?? [],
     agents: detail.agents ?? [],
+    has_console_log: detail.has_console_log ?? false,
   }
 }
 
