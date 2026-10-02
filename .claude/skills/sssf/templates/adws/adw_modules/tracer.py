@@ -189,16 +189,22 @@ class Tracer:
                 (adw_id,))]
             if any(is_alive(pid) for pid in pids):
                 continue
-            now = now_iso()
-            self.conn.execute("UPDATE phases SET status='fail', ended_at=?, "
-                              "error=COALESCE(error, 'abandoned: the run process died') "
-                              "WHERE adw_id=? AND status='running'", (now, adw_id))
-            self.event(EventRecord(adw_id=adw_id, type="error", name="abandoned",
-                                   payload={"reason": "the run's process is no longer alive; "
-                                                      "closed by a later run's startup sweep"}))
-            self.session_finish(adw_id, ok=False)
+            self.close_unsettled(adw_id, "abandoned: the run process died",
+                                 "the run's process is no longer alive; "
+                                 "closed by a later run's startup sweep")
             reaped.append(adw_id)
         return reaped
+
+    def close_unsettled(self, adw_id: str, error: str, reason: str, stopped: bool = False) -> None:
+        """Close the trace of a run whose own process can't any more: its open
+        phases failed with `error`, an event saying why, the session `fail` —
+        or `stopped`, when it was killed on request (procs.stop)."""
+        self.conn.execute("UPDATE phases SET status='fail', ended_at=?, error=COALESCE(error, ?) "
+                          "WHERE adw_id=? AND status='running'", (now_iso(), error, adw_id))
+        self.event(EventRecord(adw_id=adw_id, type="error",
+                               name="stopped" if stopped else "abandoned",
+                               payload={"reason": reason}))
+        self.session_finish(adw_id, ok=False, stopped=stopped)
 
     def session_add_usage(self, adw_id: str, tokens: int, cost: float) -> None:
         self.conn.execute(

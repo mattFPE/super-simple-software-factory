@@ -59,9 +59,33 @@ sys.exit(run.finish())
 '''
 
 
+# A GitHub CLI that answers nothing and records every call, one JSON argv per line.
+FAKE_GH = r'''
+import json, os, sys
+with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+'''
+
+
 def env() -> dict:
     return {**os.environ, "PYTHONPATH": str(TEMPLATES_ADWS), "PYTHONUTF8": "1",
             "ENGINEER_NAME": "test"}
+
+
+def fake_gh(directory: Path) -> Path:
+    """A directory holding a `gh` that runs FAKE_GH, to put first on PATH."""
+    bin_dir = directory / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "fake_gh.py").write_text(FAKE_GH, encoding="utf-8")
+    if sys.platform == "win32":
+        launcher = bin_dir / "gh.cmd"
+        launcher.write_text(f'@"{sys.executable}" "%~dp0fake_gh.py" %*', encoding="utf-8")
+    else:
+        launcher = bin_dir / "gh"
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$(dirname "$0")/fake_gh.py" "$@"\n',
+                            encoding="utf-8")
+        launcher.chmod(0o755)
+    return bin_dir
 
 
 def wait_for(done, seconds: float = 30) -> bool:
@@ -93,10 +117,18 @@ class StopTest(unittest.TestCase):
         self.spawned.append(proc)
         return proc
 
-    def stop(self, adw_id: str, *flags: str) -> subprocess.CompletedProcess:
+    def stop(self, adw_id: str, *flags: str, extra_env: dict | None = None
+             ) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(PROCS), "stop", adw_id, "--db", str(self.db),
-                               *flags], cwd=self.cwd, env=env(), capture_output=True,
-                              text=True, encoding="utf-8", timeout=120)
+                               *flags], cwd=self.cwd, env={**env(), **(extra_env or {})},
+                              capture_output=True, text=True, encoding="utf-8", timeout=120)
+
+    def trace(self) -> None:
+        """An empty trace db, with the tracer's own schema."""
+        self.db.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(self.db, isolation_level=None)) as conn:
+            from adw_modules.tracer import SCHEMA
+            conn.executescript(SCHEMA)
 
     def query(self, sql: str, *args) -> list[tuple]:
         with closing(sqlite3.connect(self.db)) as conn:
@@ -177,6 +209,50 @@ class StopTest(unittest.TestCase):
         [process] = json.loads(done.stdout)["processes"]
         self.assertEqual(process["outcome"], "mismatch")
         self.assertIsNone(stranger.poll())
+
+    def test_a_run_killed_before_it_could_settle_has_its_issue_released_for_it(self):
+        # An ADW that claimed #42 and then hangs where nothing reaches it: it
+        # never acknowledges the stop request, so it can only be killed.
+        deaf = self.spawn([sys.executable, "-c", "import signal, time; "
+                           "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)",
+                           "adw_deaf.py", ADW_ID])
+        self.trace()
+        url = "https://github.com/acme/widgets/issues/42"
+        with closing(sqlite3.connect(self.db, isolation_level=None)) as conn:
+            now = "2026-01-01T00:00:00.000+00:00"
+            conn.execute("INSERT INTO sessions (adw_id, adw_name, status, started_at) "
+                         "VALUES (?, 'adw_deaf', 'running', ?)", (ADW_ID, now))
+            conn.execute("INSERT INTO phases (phase_id, adw_id, seq, name, kind, owner, status) "
+                         "VALUES (?, ?, 2, 'claim', 'code', 'github', 'success')",
+                         (f"{ADW_ID}_02_claim", ADW_ID))
+            conn.execute("INSERT INTO events (event_id, adw_id, phase_id, type, name, payload_json)"
+                         " VALUES ('evt_1', ?, ?, 'log', 'claim', ?)",
+                         (ADW_ID, f"{ADW_ID}_02_claim", json.dumps({"issue": url})))
+            conn.execute("INSERT INTO processes (adw_id, kind, name, pid, command, started_at) "
+                         "VALUES (?, 'adw', '', ?, ?, ?)",
+                         (ADW_ID, deaf.pid, f"{sys.executable} -c import signal", now))
+        bin_dir = fake_gh(self.cwd)
+        log = self.cwd / "gh.log"
+
+        done = self.stop(ADW_ID, "--json", "--grace", "2", extra_env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_LOG": str(log)})
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        report = json.loads(done.stdout)
+        self.assertEqual(report["settled_by"], "stop")
+        self.assertEqual(report["status"], "stopped")
+        self.assertTrue(wait_for(lambda: deaf.poll() is not None, 15))
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        paths = [next(a for a in call if a.startswith("repos/")) for call in calls]
+        self.assertIn("repos/acme/widgets/issues/42/labels/agent-running", paths)
+        self.assertIn("repos/acme/widgets/issues/42/comments", paths)
+        body = next(a for call in calls for a in call if a.startswith("body="))
+        self.assertTrue(body.startswith("body=<!-- sssf -->"))
+        if sys.platform != "win32":
+            # On Windows the stub is a .cmd, and cmd.exe cuts an argument at its first
+            # newline; the real gh.exe gets the whole comment.
+            self.assertIn("was stopped", body)
+        self.assertIn("released", " ".join(report["notes"]))
 
     def test_from_the_terminal_it_says_what_it_did(self):
         self.start_hanging_run()

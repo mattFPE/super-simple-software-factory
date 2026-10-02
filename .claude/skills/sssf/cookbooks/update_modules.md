@@ -17,7 +17,7 @@ Extend `adws/adw_modules/` with new low-level logic.
 | `agent_cc.py` | the Claude Code interface — `claude -p --output-format stream-json`, same `PiRequest`/`PiResult` contract; maps pi tool names, `--session-id` creates / `--resume` continues, bills cumulative `modelUsage` as per-send deltas |
 | `gates.py` | validation gates over envelope claims |
 | `quality.py` | the deterministic `kind="code"` blocks (test, lint, typecheck, build); commands come from the config's `quality:` section, `preflight()` backs `REQUIRED_QUALITY` |
-| `procs.py` | coding-agent child processes: idle watchdog (`idle_timeout_seconds`), process-tree kill, kill-on-early-exit, wrapped around both adapters' read loops; `pid_alive`; and `stop`, the verified kill of a whole Run by adw_id, which is also its command line (`just kill`, the Console's Stop). Standard library only, so it runs as a plain script |
+| `procs.py` | coding-agent child processes: idle watchdog (`idle_timeout_seconds`), process-tree kill, kill-on-early-exit, wrapped around both adapters' read loops; `pid_alive`; and `stop`, the verified kill of a whole Run by adw_id, which is also its command line (`just kill`, the Console's Stop). A Run killed before it could settle is settled for it through `tracer.py` and `issues.py` |
 | `changes.py` | deterministic change capture: resolve the base ref, `git diff` into `context_handoff/changes.diff`, adapt the `ChangeSet` into an envelope an agent can be handed |
 | `prompts.py` | load system/user prompt refs from config, render placeholders |
 | `session.py` | mint or join `adw_id`, maintain `agent_map.json`, create session dirs incl. `context_handoff/`; the shared CLI flags (`add_cli_args`), including `--describe` |

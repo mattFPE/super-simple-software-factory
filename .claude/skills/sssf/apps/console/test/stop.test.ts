@@ -1,18 +1,19 @@
 /**
  * Stopping a Run from the Console, through the server's HTTP API alone (#10).
  *
- * A throwaway git repo holding the factory's real `procs.py` and one stub ADW,
- * adw_stuck, launched for real with `uv run`: it writes its session row,
- * starts a fake agent, records both processes the way the tracer does, and
- * then hangs, never settling and never listening for a stop. Stop must still
- * kill both, agent first, and close the Run as stopped.
+ * A throwaway git repo holding the factory's real adw_modules and two stub
+ * ADWs, each launched for real with `uv run`. adw_settles is built on the real
+ * session module and waits on a fake agent: Stop kills the agent and the Run
+ * settles itself. adw_stuck writes its trace rows by hand and then hangs,
+ * never listening for a stop: Stop must still kill both, agent first, and
+ * close the Run as stopped for it.
  *
  *   bun test
  */
 import { Database } from "bun:sqlite";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Launch, SessionDetail, StopReport } from "../shared/types.ts";
 import { APP_DIR, port as nextPort, serve, stop as stopChild, tempDir, until } from "./support.ts";
@@ -51,6 +52,38 @@ while True:
     time.sleep(1)
 `;
 
+const SETTLES = `# /// script
+# dependencies = ["pydantic", "python-dotenv", "pyyaml", "rich"]
+# ///
+"""ADW Settles — waits on an agent that never answers, until it is stopped.
+
+Phases: builder
+"""
+import argparse, pathlib, subprocess, sys
+from adw_modules import procs, session
+from adw_modules.data_types import PhaseParams, SSSFConfig
+
+parser = argparse.ArgumentParser()
+parser.add_argument("prompt")
+session.add_cli_args(parser)
+args = parser.parse_args()
+run = session.ensure(SSSFConfig(), args.adw_id)
+run.when_settled(lambda ok: pathlib.Path(f"{run.adw_id}.settled").write_text(
+    f"ok={ok} stopped={run.stopped}", encoding="utf-8"))
+with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
+                           description="Wait on an agent that never answers, to be stopped")):
+    agent = subprocess.Popen([sys.executable, "-c",
+                              "import time; print('ready', flush=True); time.sleep(300)"],
+                             stdout=subprocess.PIPE, text=True, **procs.popen_kwargs())
+    run.tracer.process_start(run.adw_id, "agent", "builder", agent.pid,
+                             procs.recorded_command(agent.args))
+    with procs.supervise(agent, 0, "fake agent"):
+        for line in agent.stdout:
+            pathlib.Path(f"{run.adw_id}.pids").write_text(f"{__import__('os').getpid()} {agent.pid}",
+                                                          encoding="utf-8")
+    raise SystemExit("the agent ended without anyone stopping it")
+`;
+
 interface Repo { root: string; db: string; port: number }
 
 function repo(): Repo {
@@ -59,7 +92,9 @@ function repo(): Repo {
   mkdirSync(join(root, "adws", "adw_modules"), { recursive: true });
   mkdirSync(join(root, "adws", "adw_data"), { recursive: true });
   writeFileSync(join(root, "adws", "adw_stuck.py"), STUCK, "utf8");
-  copyFileSync(join(MODULES, "procs.py"), join(root, "adws", "adw_modules", "procs.py"));
+  writeFileSync(join(root, "adws", "adw_settles.py"), SETTLES, "utf8");
+  cpSync(MODULES, join(root, "adws", "adw_modules"),
+    { recursive: true, filter: (path) => !path.includes("__pycache__") });
   const schema = /SCHEMA = """([\s\S]*?)"""/.exec(readFileSync(join(MODULES, "tracer.py"), "utf8"))![1]!;
   const path = join(root, "adws", "adw_data", "sssf.db");
   const db = new Database(path);
@@ -85,8 +120,8 @@ function alive(pid: number): boolean {
   return out.includes(` ${pid} `);
 }
 
-async function stuckRun(r: Repo): Promise<{ adwId: string; adwPid: number; agentPid: number }> {
-  const done = await api<Launch>(r, "/api/launches", { adw: "adw_stuck", values: { prompt: "hang" } });
+async function launched(r: Repo, adw: string): Promise<{ adwId: string; adwPid: number; agentPid: number }> {
+  const done = await api<Launch>(r, "/api/launches", { adw, values: { prompt: "hang" } });
   expect(done.status).toBe(201);
   const adwId = done.body.adw_id;
   const pids = join(r.root, `${adwId}.pids`);
@@ -99,10 +134,27 @@ const status = async (r: Repo, adwId: string) =>
   (await api<SessionDetail>(r, `/api/sessions/${adwId}`)).body.session?.status;
 
 describe("Stop", () => {
-  test("kills a hanging Run's agent and then the ADW, and the Run settles as stopped", async () => {
+  test("kills a Run's agent, and the Run settles itself as stopped", async () => {
     const r = repo();
     await serve([join("server", "index.ts"), "--db", r.db], r.port);
-    const { adwId, adwPid, agentPid } = await stuckRun(r);
+    const { adwId, adwPid, agentPid } = await launched(r, "adw_settles");
+
+    const stopped = await api<StopReport>(r, `/api/sessions/${adwId}/stop`, {});
+
+    expect(stopped.status).toBe(200);
+    expect(stopped.body.status).toBe("stopped");
+    expect(stopped.body.settled_by).toBe("run");
+    expect(stopped.body.processes.map((p) => [p.kind, p.pid, p.outcome]))
+      .toEqual([["agent", agentPid, "killed"], ["adw", adwPid, "stopped"]]);
+    expect(await until(async () => !alive(adwPid) && !alive(agentPid), 15)).toBe(true);
+    expect(await status(r, adwId)).toBe("stopped");
+    expect(readFileSync(join(r.root, `${adwId}.settled`), "utf8")).toBe("ok=False stopped=True");
+  });
+
+  test("kills a hanging Run that never listens, agent first, and closes it as stopped for it", async () => {
+    const r = repo();
+    await serve([join("server", "index.ts"), "--db", r.db], r.port);
+    const { adwId, adwPid, agentPid } = await launched(r, "adw_stuck");
     expect(alive(adwPid)).toBe(true);
 
     const stopped = await api<StopReport>(r, `/api/sessions/${adwId}/stop`, {});
@@ -110,6 +162,7 @@ describe("Stop", () => {
     expect(stopped.status).toBe(200);
     expect(stopped.body.status).toBe("stopped");
     expect(stopped.body.processes.map((p) => [p.kind, p.pid])).toEqual([["agent", agentPid], ["adw", adwPid]]);
+    expect(stopped.body.settled_by).toBe("stop");
     expect(stopped.body.processes.every((p) => p.outcome === "killed" || p.outcome === "stopped")).toBe(true);
     expect(await until(async () => !alive(adwPid) && !alive(agentPid), 15)).toBe(true);
     expect(await status(r, adwId)).toBe("stopped");

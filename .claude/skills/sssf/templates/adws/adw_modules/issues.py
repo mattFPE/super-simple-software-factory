@@ -37,7 +37,7 @@ import sys
 from functools import cache
 from pathlib import Path
 
-from . import git_helper
+from . import git_helper, worktree
 from .data_types import Issue, IssueLink, PhaseParams, RunOptions
 from .utils import operator_env
 
@@ -281,10 +281,33 @@ def claim(run, opts: RunOptions) -> None:
 
 def _release(run, opts: RunOptions, ok: bool) -> None:
     issue = opts.issue
-    path = f"repos/{_slug(issue.repo)}/issues/{issue.number}"
-    _api_optional(f"{path}/labels/{RUNNING_LABEL}", issue.repo, method="DELETE")
-    _api(f"{path}/comments", issue.repo, "-f", f"body={_outcome(run, opts, ok)}", method="POST")
+    _unclaim(issue.repo, issue.number, _outcome(run, opts, ok))
     run.console.note(f"#{issue.number}: {RUNNING_LABEL} removed, outcome commented")
+
+
+def _unclaim(repo: str, number: int, comment: str) -> None:
+    path = f"repos/{_slug(repo)}/issues/{number}"
+    _api_optional(f"{path}/labels/{RUNNING_LABEL}", repo, method="DELETE")
+    _api(f"{path}/comments", repo, "-f", f"body={comment}", method="POST")
+
+
+def release_killed(issue_url: str, adw_id: str, adw: str) -> None:
+    """Settle the claim of a Run that was killed before it could (procs.stop).
+
+    What its own settle would have said, short of what died with it (its
+    report, its spend): it was stopped, the ready label is still on, and how
+    to rerun — picking its kept worktree back up when it has one.
+    """
+    repo, number = parse_ref(issue_url)
+    kept = worktree.path_for(git_helper.repo_root(), adw_id).is_dir()
+    rerun = (f"Its worktree is kept, and rerunning picks it back up:\n"
+             f"`uv run adws/{adw}.py \"#{number}\" --adw-id {adw_id}`" if kept
+             else f"Rerun it with:\n`uv run adws/{adw}.py \"#{number}\"`")
+    _unclaim(repo, number, "\n\n".join([
+        MARKER,
+        f"⏹️ **SSSF run `{adw_id}`** (`{adw}`) was stopped, and killed before it could "
+        "report back.",
+        f"`{ready_label()}` is still on the issue. {rerun}"]))
 
 
 def _outcome(run, opts: RunOptions, ok: bool) -> str:
@@ -406,9 +429,12 @@ def _labels(raw: dict) -> list[str]:
 
 def _gh(args: list[str], repo: str) -> subprocess.CompletedProcess:
     host, _ = _split(repo)
-    argv = ["gh", "api", *(["--hostname", host] if host else []), *args]
+    env = operator_env()
+    # Resolved the way `load` checks for it: on Windows a bare "gh" finds only gh.exe.
+    gh = shutil.which("gh", path=env.get("PATH")) or "gh"
+    argv = [gh, "api", *(["--hostname", host] if host else []), *args]
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", env=operator_env())
+                          errors="replace", env=env)
 
 
 def _api(path: str, repo: str, *fields: str, method: str = "GET"):

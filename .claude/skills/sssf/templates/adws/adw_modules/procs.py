@@ -1,5 +1,5 @@
 # /// script
-# dependencies = []
+# dependencies = ["pydantic", "python-dotenv", "pyyaml", "rich"]
 # ///
 """Child-process control for coding agents: idle watchdog, tree kill, and stop.
 
@@ -15,7 +15,8 @@ command line — `just kill` and the Console's Stop both run it:
 
     uv run adws/adw_modules/procs.py stop <adw_id> [--db adws/adw_data/sssf.db] [--json]
 
-It uses only the standard library, so it runs as a plain script.
+Run that way it re-enters through the package, so a Run it has to close for
+itself is closed by the tracer, and its issue released by issues.py.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import secrets
 import signal
 import sqlite3
 import subprocess
@@ -280,31 +280,38 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _close_trace_as_stopped(conn: sqlite3.Connection, sessions_dir: Path, adw_id: str) -> None:
-    """Close a Run's trace as stopped when its own process could not.
+def _settle_killed(db_path: Path, adw_id: str) -> list[str]:
+    """Settle a Run that was killed before it could, as its own settle would have.
 
-    Only for a Run that never settled itself: one hard-killed, or whose process
-    was already gone. It writes what the Run's tracer would have — the open
-    phase failed, an event saying why, the session `stopped`, no process alive
-    — in plain SQL, because this file runs without the ADWs' dependencies.
+    Its trace is closed as `stopped` by the tracer; an issue it claimed is
+    released with a comment saying so. Returns notes for the report.
     """
-    now = _now()
-    reason = "stopped: the Run was killed before it could settle itself"
-    conn.execute("UPDATE phases SET status='fail', ended_at=?, error=COALESCE(error, ?) "
-                 "WHERE adw_id=? AND status='running'", (now, reason, adw_id))
-    event_id, payload = f"evt_{secrets.token_hex(6)}", {"reason": reason}
-    conn.execute("INSERT INTO events (event_id, adw_id, phase_id, parent_id, type, name, "
-                 "payload_json, tokens, started_at) VALUES (?,?,'',NULL,'error','stopped',?,0,?)",
-                 (event_id, adw_id, json.dumps(payload), now))
-    conn.execute("UPDATE sessions SET status='stopped', ended_at=? WHERE adw_id=? "
-                 "AND status='running'", (now, adw_id))
-    conn.execute("UPDATE processes SET ended_at=? WHERE adw_id=? AND ended_at IS NULL",
-                 (now, adw_id))
-    events = sessions_dir / adw_id / "events.jsonl"
-    if events.parent.is_dir():
-        with events.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"event_id": event_id, "ts": now, "adw_id": adw_id, "phase_id": "",
-                                "type": "error", "name": "stopped", "payload": payload}) + "\n")
+    # Here, not at the top: run as a script, this file has no package until
+    # __main__ re-enters it through adw_modules.
+    from . import issues
+    from .tracer import Tracer
+    tracer = Tracer(db_path, db_path.parent / "sessions" / adw_id / "events.jsonl")
+    try:
+        tracer.close_unsettled(adw_id, "stopped: killed before it could settle itself",
+                               "the Run was stopped, and killed before it could settle itself",
+                               stopped=True)
+        claim = tracer.conn.execute(
+            "SELECT e.payload_json FROM events e JOIN phases p ON p.phase_id = e.phase_id "
+            "WHERE p.adw_id=? AND p.name='claim' AND p.status='success' AND e.type='log'",
+            (adw_id,)).fetchone()
+        adw = tracer.conn.execute("SELECT adw_name FROM sessions WHERE adw_id=?",
+                                  (adw_id,)).fetchone()[0] or "adw_<name>"
+    finally:
+        tracer.conn.close()
+    issue = json.loads(claim[0]).get("issue") if claim else None
+    if not issue:
+        return []
+    try:
+        issues.release_killed(issue, adw_id, adw.split(" + ")[-1])
+    except (RuntimeError, OSError, SystemExit) as error:
+        return [f"its issue {issue} is still claimed, because releasing it failed ({error}): "
+                f"remove the {issues.RUNNING_LABEL} label, or rerun it with --force"]
+    return [f"its issue's claim was released for it: {issue}"]
 
 
 def _status(conn: sqlite3.Connection, adw_id: str) -> str | None:
@@ -400,16 +407,10 @@ def stop(db_path: str | Path, adw_id: str, grace_seconds: float = GRACE_SECONDS)
         _kill_agents(late, adw_id)
         report += late
 
-        settled_by = "run"
+        settled_by, notes = "run", []
         if _status(conn, adw_id) == "running":
-            _close_trace_as_stopped(conn, sessions_dir, adw_id)
+            notes = _settle_killed(db_path, adw_id)
             settled_by = "stop"
-        notes = []
-        claimed = conn.execute("SELECT 1 FROM phases WHERE adw_id=? AND name='claim' "
-                               "AND status='success'", (adw_id,)).fetchone()
-        if claimed and settled_by == "stop":
-            notes.append("its issue is still claimed: the Run was killed before it could "
-                         "release it, so rerun it with --force")
         for p in report:
             p["said"] = _describe(p)
         return {"adw_id": adw_id, "status": _status(conn, adw_id), "settled_by": settled_by,
@@ -461,4 +462,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A script has no package, so re-enter through adw_modules: stop() needs
+    # its siblings when it has to settle a Run for it.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from adw_modules import procs
+    sys.exit(procs.main())
