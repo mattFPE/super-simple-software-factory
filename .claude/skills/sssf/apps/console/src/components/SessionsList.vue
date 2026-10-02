@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import type { SessionSummary } from '../lib/types'
-import { fetchSessions } from '../lib/api'
+import { fetchLaunches, fetchSessions } from '../lib/api'
+import { launches } from '../lib/launches'
 import { ts } from '../lib/format'
+import LaunchCard from './LaunchCard.vue'
 import SessionCard from './SessionCard.vue'
 
 const sessions = shallowRef<SessionSummary[]>([])
@@ -17,7 +19,9 @@ async function tick() {
   if (inflight) return
   inflight = true
   try {
-    sessions.value = await fetchSessions()
+    const [rows, launched] = await Promise.all([fetchSessions(), fetchLaunches()])
+    sessions.value = rows
+    launches.value = launched
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
@@ -44,6 +48,9 @@ function onArchived(adwId: string) {
   sessions.value = sessions.value.filter((s) => s.adw_id !== adwId)
 }
 
+/** In-flight Launches go on top; a started one is drawn by its session card instead. */
+const pending = computed(() => launches.value.filter((l) => l.state !== 'started'))
+
 const ordered = computed(() =>
   sessions.value.toSorted((a, b) => (ts(b.started_at) || 0) - (ts(a.started_at) || 0)),
 )
@@ -53,7 +60,14 @@ const ordered = computed(() =>
   <div class="sessions">
     <div v-if="apiError" class="error-bar">api unreachable — retrying {{ apiError }}</div>
 
-    <div v-if="ordered.length" class="list-head dim">{{ ordered.length }} runs</div>
+    <div class="list-head">
+      <h2 class="pane-title">Runs</h2>
+      <span v-if="ordered.length" class="dim">{{ ordered.length }} runs</span>
+    </div>
+
+    <div v-if="pending.length" class="cards">
+      <LaunchCard v-for="l in pending" :key="l.adw_id" :launch="l" />
+    </div>
 
     <div v-if="ordered.length" class="cards">
       <SessionCard
@@ -64,8 +78,8 @@ const ordered = computed(() =>
         @archived="onArchived"
       />
     </div>
-    <div v-else-if="loaded" class="empty-state">no sessions yet — run an ADW to see it here</div>
-    <div v-else-if="!apiError" class="empty-state">loading sessions…</div>
+    <div v-else-if="loaded && !pending.length" class="empty-state">no Runs yet — launch one, or run an ADW in a terminal, to see it here</div>
+    <div v-else-if="!loaded && !apiError" class="empty-state">loading Runs…</div>
   </div>
 </template>
 
@@ -76,8 +90,19 @@ const ordered = computed(() =>
 }
 
 .list-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
   padding: 16px 24px 0;
   font-size: 16px;
+}
+
+.pane-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--dim);
 }
 
 .cards {

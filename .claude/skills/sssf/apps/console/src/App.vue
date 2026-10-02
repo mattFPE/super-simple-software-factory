@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useRoute, hrefFor, phaseCrumb } from './lib/router'
+import LaunchPane from './components/LaunchPane.vue'
 import SessionsList from './components/SessionsList.vue'
 import SessionTrace from './components/SessionTrace.vue'
 
@@ -19,7 +20,7 @@ const route = useRoute()
         </svg>
         <span class="brand">Super Simple Software Factory</span>
         <span class="sep">›</span>
-        <a :href="hrefFor()" :class="{ current: !route.adwId }">sessions</a>
+        <a :href="hrefFor()" :class="{ current: !route.adwId }">runs</a>
         <template v-if="route.adwId">
           <span class="sep">›</span>
           <a :href="hrefFor(route.adwId)" :class="{ current: !route.phaseId }">{{
@@ -34,13 +35,29 @@ const route = useRoute()
       <span class="live-hint"><span class="live-dot" /> live</span>
     </header>
     <main>
-      <SessionsList v-if="!route.adwId" />
+      <div v-if="!route.adwId" class="home">
+        <LaunchPane />
+        <SessionsList />
+      </div>
       <SessionTrace v-else :key="route.adwId" :adw-id="route.adwId" :phase-id="route.phaseId" />
     </main>
   </div>
 </template>
 
 <style scoped>
+/* Launch on the left, Runs on the right; stacked when there's no room for both. */
+.home {
+  display: grid;
+  grid-template-columns: minmax(340px, 440px) minmax(0, 1fr);
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .home {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .topbar {
   display: flex;
   align-items: center;

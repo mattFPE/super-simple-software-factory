@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The Console for the Super Simple Software Factory — a read-only trace UI that polls sssf.db in a target repo.",
+  "description": "The Console for the Super Simple Software Factory — launches ADWs and watches their Runs by polling sssf.db in a target repo.",
   "scripts": {
     "dev": "vite",
     "server": "bun run server/index.ts",
