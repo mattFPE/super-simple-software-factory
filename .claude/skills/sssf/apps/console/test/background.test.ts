@@ -80,6 +80,16 @@ describe("background tooling", () => {
     expect(await until(async () => (await health(port)) === null)).toBe(true);
   });
 
+  test("reports no runs yet for a Console whose db no Run has created", async () => {
+    const port = nextPort();
+    const db = join(tempDir(), "adw_data", "sssf.db");
+    await serve([join("server", "index.ts"), "--db", db], port);
+    const status = tooling("status", port);
+    expect(status.status).toBe(0);
+    expect(status.out).toContain("no runs yet");
+    expect(status.out).toContain(db);
+  });
+
   test("leaves a stranger on the port alone", async () => {
     const port = nextPort();
     await serve([preRenameServer("something-else")], port);

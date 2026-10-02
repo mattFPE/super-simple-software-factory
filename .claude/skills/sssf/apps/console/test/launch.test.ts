@@ -14,8 +14,8 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { join, resolve } from "node:path";
-import type { AdwCatalog, Launch, LaunchPreview, SessionDetail } from "../shared/types.ts";
+import { dirname, join, resolve } from "node:path";
+import type { AdwCatalog, HealthResponse, Launch, LaunchPreview, SessionDetail } from "../shared/types.ts";
 import { APP_DIR, health, onCleanup, port as nextPort, serve, stop, tempDir, until } from "./support.ts";
 
 setDefaultTimeout(60_000);
@@ -56,9 +56,9 @@ def describe(d):
 def adw_id():
     return sys.argv[sys.argv.index("--adw-id") + 1]
 
-def held():
+def held(name="hold"):
     end = time.time() + 60
-    while os.path.exists("hold") and time.time() < end:
+    while os.path.exists(name) and time.time() < end:
         time.sleep(0.1)
 
 def db():
@@ -134,18 +134,44 @@ parser.parse_args()
 
 interface Repo { root: string; db: string; port: number }
 
-/** A git repo with the stubs in adws/ and an empty trace db the real tracer's schema built. */
-function repo(adws: Record<string, string> = STUBS): Repo {
+const SCHEMA = /SCHEMA = """([\s\S]*?)"""/.exec(readFileSync(TRACER, "utf8"))![1]!;
+
+/**
+ * The first Run in a fresh repo: once its `hold_db` file is gone it creates the
+ * trace db as the tracer does — WAL, then the schema — and writes its row.
+ */
+const ADW_FIRST = stub(
+  "ADW First — creates the trace db, as a first Run's tracer does.\n\nPhases: engineer(request) -> builder\n",
+  DESCRIBE_PLAIN,
+  `
+held("hold_db")
+os.makedirs("adws/adw_data", exist_ok=True)
+with db() as c:
+    c.execute("PRAGMA journal_mode=WAL")
+    c.executescript(${JSON.stringify(SCHEMA)})
+    c.execute("INSERT INTO sessions (adw_id, adw_name, request, status, engineer, started_at)"
+              " VALUES (?, 'adw_first', ?, 'running', 'stub', ?)",
+              (adw_id(), json.dumps(sys.argv[1:]), datetime.now(timezone.utc).isoformat()))
+held()
+`);
+
+/**
+ * A git repo with the stubs in adws/ and an empty trace db the real tracer's
+ * schema built — or, `{ db: false }`, a fresh install no Run has traced yet.
+ */
+function repo(adws: Record<string, string> = STUBS, { db: withDb = true } = {}): Repo {
   const root = tempDir();
   spawnSync("git", ["init", "-q"], { cwd: root });
-  mkdirSync(join(root, "adws", "adw_data"), { recursive: true });
+  mkdirSync(join(root, "adws"), { recursive: true });
   for (const [name, source] of Object.entries(adws)) writeFileSync(join(root, "adws", name), source, "utf8");
-  const schema = /SCHEMA = """([\s\S]*?)"""/.exec(readFileSync(TRACER, "utf8"))![1]!;
   const path = join(root, "adws", "adw_data", "sssf.db");
-  const db = new Database(path);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec(schema);
-  db.close();
+  if (withDb) {
+    mkdirSync(dirname(path), { recursive: true });
+    const db = new Database(path);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(SCHEMA);
+    db.close();
+  }
   hold(root);
   onCleanup(() => rmSync(join(root, "hold"), { force: true }));
   return { root, db: path, port: nextPort() };
@@ -529,6 +555,49 @@ describe("Dismiss", () => {
     await settlesAs(r, started.adw_id, "started");
     expect((await api(r, `/api/launches/${started.adw_id}/dismiss`, {})).status).toBe(409);
     expect((await launchState(r, started.adw_id))?.state).toBe("started");
+  });
+});
+
+describe("before the first Run", () => {
+  test("the Console starts with no db, says so, and reads as an empty trace", async () => {
+    const r = repo({ ...STUBS, "adw_first.py": ADW_FIRST }, { db: false });
+    await startConsole(r);
+    const { body: h } = await api<HealthResponse>(r, "/api/health");
+    expect(h.db).toBe(r.db);
+    expect(h.db_exists).toBe(false);
+    expect(h.sessions).toBe(0);
+    expect((await api(r, "/api/sessions")).body).toEqual([]);
+    // As an empty trace answers: a session lookup is 404, its lists are empty.
+    expect((await api(r, "/api/sessions/nosuchrun")).status).toBe(404);
+    expect((await api(r, "/api/sessions/nosuchrun/agents/builder/prompts")).status).toBe(404);
+    expect((await api(r, "/api/sessions/nosuchrun/events")).body).toEqual({ events: [], cursor: 0, has_more: false });
+    expect((await api(r, "/api/sessions/nosuchrun/envelopes")).body).toEqual([]);
+    expect((await api(r, "/api/sessions/nosuchrun/gates")).body).toEqual([]);
+    expect((await api(r, "/api/sessions/nosuchrun/archive", {})).status).toBe(404);
+    expect((await api(r, "/api/sessions/nosuchrun/stop", {})).status).toBe(404);
+    expect((await api<AdwCatalog>(r, "/api/adws")).body.adws.map((a) => a.name)).toContain("adw_first");
+    expect(existsSync(r.db)).toBe(false);
+  });
+
+  test("a Launch is Starting, then its Run once its tracer creates the db — no restart", async () => {
+    const r = repo({ ...STUBS, "adw_first.py": ADW_FIRST }, { db: false });
+    writeFileSync(join(r.root, "hold_db"), "", "utf8");
+    onCleanup(() => rmSync(join(r.root, "hold_db"), { force: true }));
+    await startConsole(r);
+    const started = await launch(r, "adw_first", { prompt: "the very first" });
+    expect((await launchState(r, started.adw_id))?.state).toBe("starting");
+    expect((await api(r, "/api/sessions")).body).toEqual([]);
+    expect(existsSync(r.db)).toBe(false);
+
+    rmSync(join(r.root, "hold_db"));
+    await settlesAs(r, started.adw_id, "started");
+    const sessions = (await api<{ adw_id: string }[]>(r, "/api/sessions")).body;
+    expect(sessions.map((s) => s.adw_id)).toEqual([started.adw_id]);
+    expect((await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`)).status).toBe(200);
+    const { body: h } = await api<HealthResponse>(r, "/api/health");
+    expect(h.db_exists).toBe(true);
+    expect(h.sessions).toBe(1);
+    expect(h.journal_mode).toBe("wal");
   });
 });
 

@@ -10,6 +10,9 @@
  * browser, so it lives on the session row rather than in localStorage. It is
  * the only write this process can make, it touches exactly one column, and it
  * never runs unless a human clicks the button.
+ *
+ * Neither connection ever creates the db: in a freshly installed repo it is the
+ * first ADW's tracer that does, and until then `TraceDb` reads as an empty trace.
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -52,6 +55,65 @@ export function resolveDbPath(argv: string[] = Bun.argv): string {
   return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
 }
 
+/** Where the ADW session dirs live: beside the db, in the same data_dir. */
+function sessionsDirOf(dbPath: string): string {
+  return resolve(dirname(dbPath), "sessions");
+}
+
+/**
+ * The trace db, whether or not a Run has created it yet.
+ *
+ * A freshly installed repo has no sssf.db until its first ADW's tracer makes
+ * one, and this process never makes it (ADR 0001). So the db is looked for on
+ * each read until it is there: `read` answers with `empty` — what an empty
+ * trace would say — until then, and from the read the tracer's schema has
+ * landed on, through the real connection, with no restart.
+ */
+export class TraceDb {
+  readonly sessionsDir: string;
+  private db: SssfDb | null = null;
+
+  constructor(readonly path: string) {
+    this.sessionsDir = sessionsDirOf(path);
+  }
+
+  /** The open db, or null while no tracer has created it. */
+  open(): SssfDb | null {
+    if (!this.db && existsSync(this.path) && hasSchema(this.path)) this.db = new SssfDb(this.path);
+    return this.db;
+  }
+
+  read<T>(query: (db: SssfDb) => T, empty: T): T {
+    const db = this.open();
+    return db ? query(db) : empty;
+  }
+
+  close(): void {
+    this.db?.close();
+  }
+}
+
+/**
+ * Whether the tracer has written its whole schema. The file appears the moment
+ * the tracer connects, a little before its tables do, and they land one
+ * statement at a time; opening it sooner would fail queries on the tables still
+ * to come, and warn about a journal mode the tracer is about to set. Its last
+ * table, agent_sessions, means all of them are there.
+ */
+function hasSchema(path: string): boolean {
+  let probe: Database | null = null;
+  try {
+    probe = new Database(path, { readonly: true });
+    return probe
+      .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
+      .get() !== null;
+  } catch {
+    return false;   // mid-creation the tracer may hold it locked: the next read looks again
+  } finally {
+    probe?.close();
+  }
+}
+
 export class SssfDb {
   readonly path: string;
   /**
@@ -77,7 +139,7 @@ export class SssfDb {
       );
     }
     this.path = path;
-    this.sessionsDir = resolve(dirname(path), "sessions");
+    this.sessionsDir = sessionsDirOf(path);
     this.db = new Database(path, { readonly: true });
 
     // WAL is set by the tracer when it creates the db; a readonly connection

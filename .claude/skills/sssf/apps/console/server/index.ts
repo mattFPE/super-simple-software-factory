@@ -7,6 +7,9 @@
  * ADW's own tracer writes the trace; the Console only reads it back (ADR 0001).
  * Stop runs the factory's own verified kill, procs.py (server/stop.ts).
  *
+ * It starts before the repo's first Run has created sssf.db, and reads as an
+ * empty trace until the tracer does (TraceDb); it never creates the db itself.
+ *
  * There is no ingest endpoint and no websocket. The data path is
  * agents → sqlite → web ui, and the UI gets there by polling. It listens on
  * 127.0.0.1 only: there is no auth, and a Launch runs code.
@@ -17,7 +20,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { SssfDb, resolveDbPath } from "./db.ts";
+import { TraceDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
 import { listReady } from "./issues.ts";
 import { stopRun } from "./stop.ts";
@@ -27,20 +30,17 @@ const PORT = Number(process.env.PORT ?? 4600);
 const DIST_DIR = resolve(import.meta.dir, "..", "dist");
 
 const dbPath = resolveDbPath();
-let db: SssfDb;
-try {
-  db = new SssfDb(dbPath);
-} catch (error) {
-  console.error(`[sssf] ${(error as Error).message}`);
-  process.exit(1);
-}
-const launches: Launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir, db,
-  async () => (await readyIssues()).tracker);
+const trace = new TraceDb(dbPath);
+const launches: Launches = new Launches(resolveRepoRoot(dbPath), trace.sessionsDir, {
+  session: (adwId) => trace.read((db) => db.session(adwId), null),
+  adwProcessCount: (adwId) => trace.read((db) => db.adwProcessCount(adwId), 0),
+  claimCount: (adwId) => trace.read((db) => db.claimCount(adwId), 0),
+}, async () => (await readyIssues()).tracker);
 
 /** The Ready issues, each listing also telling the Launches which Tracker this repo uses. */
 async function readyIssues(): Promise<IssueListing> {
   const listing = await listReady(launches.repoRoot, {
-    claimedRuns: () => db.claimedRuns(),
+    claimedRuns: () => trace.read((db) => db.claimedRuns(), new Map()),
     heldIssues: () => launches.heldIssues(),
   });
   launches.learnTracker(listing.tracker);
@@ -145,18 +145,19 @@ const server = Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
   routes: {
-    "/api/health": safely(
-      () =>
-        json({
-          ok: true,
-          service: "sssf-visualizer",
-          services: ["sssf-console", "sssf-visualizer"],
-          pid: process.pid,
-          db: db.path,
-          journal_mode: db.journalMode,
-          sessions: db.sessionCount(),
-        } satisfies HealthResponse),
-    ),
+    "/api/health": safely(() => {
+      const db = trace.open();
+      return json({
+        ok: true,
+        service: "sssf-visualizer",
+        services: ["sssf-console", "sssf-visualizer"],
+        pid: process.pid,
+        db: trace.path,
+        db_exists: db !== null,
+        journal_mode: db?.journalMode ?? null,
+        sessions: db?.sessionCount() ?? 0,
+      } satisfies HealthResponse);
+    }),
 
     // The repo's ADWs, each with the command line its --describe reports.
     "/api/adws": safely(async () => json(await launches.catalog())),
@@ -194,10 +195,10 @@ const server = Bun.serve({
         : notFound(`no launch log for ${param(req, "adw_id")}`);
     }),
 
-    "/api/sessions": safely((req) => json(db.sessions(intQuery(req, "limit", 200)))),
+    "/api/sessions": safely((req) => json(trace.read((db) => db.sessions(intQuery(req, "limit", 200)), []))),
 
     "/api/sessions/:adw_id": safely((req) => {
-      const detail = db.sessionDetail(param(req, "adw_id"));
+      const detail = trace.read((db) => db.sessionDetail(param(req, "adw_id")), null);
       return detail ? json(detail) : notFound(`no session ${param(req, "adw_id")}`);
     }),
 
@@ -211,7 +212,7 @@ const server = Bun.serve({
         }
         const body = (await req.json().catch(() => ({}))) as { archived?: unknown };
         const archived = body.archived === undefined ? true : Boolean(body.archived);
-        return db.setArchived(adwId, archived)
+        return trace.read((db) => db.setArchived(adwId, archived), false)
           ? json({ adw_id: adwId, archived })
           : notFound(`no session ${adwId}`);
       }),
@@ -220,24 +221,27 @@ const server = Bun.serve({
     // Stop a running Run with the factory's verified kill. The Run settles its
     // own trace; only one that can't is closed by procs.py, never by this server.
     "/api/sessions/:adw_id/stop": {
-      POST: safely(async (req) => json(await stopRun(launches.repoRoot, db.path, param(req, "adw_id")))),
+      // With no db there is no Run to stop, and procs.py's connection would create the file.
+      POST: safely(async (req) => trace.open()
+        ? json(await stopRun(launches.repoRoot, trace.path, param(req, "adw_id")))
+        : notFound(`no session ${param(req, "adw_id")}`)),
     },
 
     "/api/sessions/:adw_id/events": safely((req) =>
       json(
-        db.events(
+        trace.read((db) => db.events(
           param(req, "adw_id"),
           intQuery(req, "after", 0),
           intQuery(req, "limit", 500),
-        ),
+        ), { events: [], cursor: Math.max(0, intQuery(req, "after", 0)), has_more: false }),
       ),
     ),
 
     "/api/sessions/:adw_id/envelopes": safely((req) =>
-      json(db.envelopes(param(req, "adw_id"))),
+      json(trace.read((db) => db.envelopes(param(req, "adw_id")), [])),
     ),
 
-    "/api/sessions/:adw_id/gates": safely((req) => json(db.gates(param(req, "adw_id")))),
+    "/api/sessions/:adw_id/gates": safely((req) => json(trace.read((db) => db.gates(param(req, "adw_id")), []))),
 
     // The exact prompts an agent was sent, read from the session dir. Files are
     // the raw record; the db has no copy of them.
@@ -247,11 +251,11 @@ const server = Bun.serve({
       if (!isSafeSegment(adwId) || !isSafeSegment(agent)) {
         return json({ error: "invalid adw_id or agent" } satisfies ApiError, 400);
       }
-      if (!db.session(adwId)) return notFound(`no session ${adwId}`);
+      if (!trace.read((db) => db.session(adwId), null)) return notFound(`no session ${adwId}`);
 
-      const dir = resolve(db.sessionsDir, adwId, agent, "prompts");
+      const dir = resolve(trace.sessionsDir, adwId, agent, "prompts");
       // Defense in depth: the segment check already forbids traversal.
-      if (dir !== db.sessionsDir && !dir.startsWith(db.sessionsDir + sep)) {
+      if (dir !== trace.sessionsDir && !dir.startsWith(trace.sessionsDir + sep)) {
         return json({ error: "invalid path" } satisfies ApiError, 400);
       }
 
@@ -276,7 +280,10 @@ const server = Bun.serve({
 });
 
 console.log(`[sssf] Console api     http://127.0.0.1:${server.port}`);
-console.log(`[sssf] db              ${db.path}  [journal_mode=${db.journalMode}]`);
+const db = trace.open();
+console.log(db
+  ? `[sssf] db              ${trace.path}  [journal_mode=${db.journalMode}]`
+  : `[sssf] db              ${trace.path}  (not there yet: the first Run's tracer creates it)`);
 console.log(`[sssf] repo            ${launches.repoRoot}`);
 console.log(
   existsSync(DIST_DIR)
@@ -285,6 +292,6 @@ console.log(
 );
 
 process.on("SIGINT", () => {
-  db.close();
+  trace.close();
   process.exit(0);
 });

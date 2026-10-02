@@ -54,7 +54,8 @@ async function waitFor(done: () => Promise<boolean>, seconds: number): Promise<b
 
 function running(health: HealthResponse): void {
   console.log(`[sssf] Console   ${URL_BASE}   (pid ${health.pid}, stop: just console-stop)`);
-  console.log(`[sssf] db        ${health.db}`);
+  // A server from before db_exists only ever ran with its db there.
+  console.log(`[sssf] db        ${health.db}${health.db_exists === false ? "  (no runs yet)" : ""}`);
 }
 
 async function start(): Promise<number> {

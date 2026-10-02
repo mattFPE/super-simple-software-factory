@@ -48,13 +48,17 @@ export class HttpError extends Error {
 /**
  * The target repo: --repo, then SSSF_REPO, then the git checkout holding the
  * db. ADWs run from here, because their default config path is relative to it.
+ * Before the first Run the db's own dir may not exist yet, so git is asked from
+ * the nearest dir above it that does.
  */
 export function resolveRepoRoot(dbPath: string, argv: string[] = Bun.argv): string {
   const flagIndex = argv.indexOf("--repo");
   const raw = (flagIndex !== -1 ? argv[flagIndex + 1] : undefined) ?? process.env.SSSF_REPO;
   if (raw) return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+  let dir = dirname(dbPath);
+  while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
   const git = spawnSync("git", ["rev-parse", "--show-toplevel"],
-    { cwd: dirname(dbPath), encoding: "utf8", windowsHide: true });
+    { cwd: dir, encoding: "utf8", windowsHide: true });
   return git.status === 0 && git.stdout.trim() ? resolve(git.stdout.trim()) : process.cwd();
 }
 

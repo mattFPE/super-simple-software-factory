@@ -306,7 +306,10 @@ export interface HealthResponse {
   services: ["sssf-console", "sssf-visualizer"];
   pid: number;
   db: string;
-  journal_mode: string;
+  /** False until a Run's tracer has created the db: the Console starts without one. */
+  db_exists: boolean;
+  /** Null while the db doesn't exist. */
+  journal_mode: string | null;
   sessions: number;
 }
 
