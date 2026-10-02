@@ -35,6 +35,7 @@ export type {
   LaunchState,
   IssueLink,
   IssueListing,
+  IssueRerun,
   IssueRun,
   IssueVerdict,
   ReadyIssue,

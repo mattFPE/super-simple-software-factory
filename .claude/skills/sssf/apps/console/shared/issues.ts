@@ -11,3 +11,12 @@ export function issueNamed(prompt: unknown): number | null {
   const ref = /^#(\d+)$/.exec(text) ?? /^https?:\/\/\S+\/issues\/(\d+)\/?(?:[?#]\S*)?$/.exec(text);
   return ref ? Number(ref[1]) : null;
 }
+
+/**
+ * The ADW that claimed a Run's issue, from the Run's `adw_name` ("adw_a + adw_b"):
+ * its first, since only a committing, non-resuming ADW claims, and that one
+ * starts the Run. A Rerun runs it again.
+ */
+export function claimingAdw(adwName: string | null | undefined): string | null {
+  return adwName?.split(" + ")[0] || null;
+}

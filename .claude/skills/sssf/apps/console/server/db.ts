@@ -29,6 +29,9 @@ import type {
   SessionUsage,
 } from "../shared/types.ts";
 
+/** What worktree.enter and worktree.land log: the worktree path, and the PR a Run landed. */
+type LoggedPhase = { path?: unknown; pr?: unknown };
+
 const DEFAULT_DB_RELATIVE = "adws/adw_data/sssf.db";
 const MAX_LIMIT = 1000;
 const DEFAULT_LIMIT = 500;
@@ -234,11 +237,13 @@ export class SssfDb {
 
   /**
    * Each issue's most recent Run, by the issue URL its Claim phase logged
-   * (issues.claim), so a claimed issue can link to the Run working on it.
+   * (issues.claim), so a claimed issue can link to the Run working on it —
+   * with the worktree and PR it logged (worktree.enter, worktree.land), which
+   * a failed Run's Rerun is built from.
    */
   claimedRuns(): Map<string, IssueRun> {
     const rows = this.db
-      .query<IssueRun & { payload_json: string | null }, []>(
+      .query<Omit<IssueRun, "worktree" | "pr"> & { payload_json: string | null }, []>(
         `SELECT s.adw_id, ${this.optionalColumn("sessions", "adw_name")}, s.status, e.payload_json
            FROM events e
            JOIN phases p ON p.phase_id = e.phase_id
@@ -255,13 +260,36 @@ export class SssfDb {
       } catch {
         continue;
       }
-      if (typeof issue === "string") runs.set(issue, run);   // later Runs overwrite earlier ones
+      if (typeof issue === "string") runs.set(issue, { ...run, worktree: null, pr: null });   // later Runs overwrite earlier ones
+    }
+    const byAdw = new Map([...runs.values()].map((run) => [run.adw_id, run]));
+    if (byAdw.size === 0) return runs;
+    const ids = [...byAdw.keys()];
+    const logs = this.db
+      .query<{ adw_id: string; name: string; payload_json: string | null }, string[]>(
+        `SELECT p.adw_id, p.name, e.payload_json
+           FROM events e JOIN phases p ON p.phase_id = e.phase_id
+          WHERE p.adw_id IN (${ids.map(() => "?").join(", ")})
+            AND p.name IN ('worktree', 'land') AND e.type = 'log'
+          ORDER BY e.rowid`,
+      )
+      .all(...ids);
+    for (const { adw_id, name, payload_json } of logs) {
+      let logged: LoggedPhase | null = null;
+      try {
+        logged = JSON.parse(payload_json ?? "null") as LoggedPhase | null;
+      } catch {
+        continue;
+      }
+      const run = byAdw.get(adw_id)!;   // a rerun logs again: the latest wins
+      if (name === "worktree" && typeof logged?.path === "string") run.worktree = logged.path;
+      if (name === "land") run.pr = typeof logged?.pr === "string" && logged.pr ? logged.pr : null;
     }
     return runs;
   }
 
-  /** Whether this Run's Claim phase has logged the issue it claimed. */
-  claimed(adwId: string): boolean {
+  /** How many times this Run's Claim phase has logged the issue it claimed: once per process that claimed it. */
+  claimCount(adwId: string): number {
     return (
       this.db
         .query<{ n: number }, [string]>(
@@ -269,7 +297,7 @@ export class SssfDb {
             WHERE p.adw_id = ? AND p.name = 'claim' AND e.type = 'log'`,
         )
         .get(adwId)?.n ?? 0
-    ) > 0;
+    );
   }
 
   phases(adwId: string): Phase[] {

@@ -16,7 +16,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { AdwCatalog, IssueListing, Launch } from "../shared/types.ts";
+import type { AdwCatalog, IssueListing, Launch, LaunchPreview } from "../shared/types.ts";
 import { APP_DIR, onCleanup, port as nextPort, serve, tempDir, until } from "./support.ts";
 
 setDefaultTimeout(60_000);
@@ -27,6 +27,7 @@ const ISSUE_URL = "https://github.com/acme/widgets/issues";
 const OPTIONS = [
   { name: "prompt", flag: null, kind: "value", help: "what to do", default: null, choices: null, required: true },
   { name: "adw_id", flag: "--adw-id", kind: "value", help: null, default: null, choices: null, required: false },
+  { name: "force", flag: "--force", kind: "flag", help: null, default: false, choices: null, required: false },
 ];
 
 function adw(doc: string, phases: string, description: object, body = ""): string {
@@ -47,21 +48,27 @@ def wait(name):
         time.sleep(0.1)
 `;
 
-/** Its row once the hold goes, then its Claim once the claim-hold goes, logged as issues.claim logs one. */
+/**
+ * Its row and its process once the hold goes, then its Claim once the
+ * claim-hold goes, logged as issues.claim logs one. A rerun joins its Run's
+ * row as session.ensure does, and claims the issue again.
+ */
 const CLAIMS_ON_RELEASE = `${WAITS}
 wait("hold")
 now = datetime.now(timezone.utc).isoformat()
 with sqlite3.connect("adws/adw_data/sssf.db", timeout=10) as c:
-    c.execute("INSERT INTO sessions (adw_id, adw_name, request, status, started_at) VALUES (?, 'adw_full', ?, 'running', ?)",
-              (adw_id, json.dumps(sys.argv[1:]), now))
+    c.execute("INSERT INTO sessions (adw_id, adw_name, request, status, started_at) VALUES (?, 'adw_full', ?, 'running', ?)"
+              " ON CONFLICT(adw_id) DO UPDATE SET status = 'running'", (adw_id, json.dumps(sys.argv[1:]), now))
+    c.execute("INSERT INTO processes (adw_id, kind, name, pid, command, started_at) VALUES (?, 'adw', '', ?, ?, ?)",
+              (adw_id, os.getpid(), " ".join(sys.argv), now))
 wait("claim-hold")
-url = "${ISSUE_URL}/" + sys.argv[-1].lstrip("#")
+url = "${ISSUE_URL}/" + next(a for a in sys.argv[1:] if a.startswith("#")).lstrip("#")
 with sqlite3.connect("adws/adw_data/sssf.db", timeout=10) as c:
-    c.execute("INSERT INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)"
+    c.execute("INSERT OR IGNORE INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)"
               " VALUES (?, ?, 2, 'claim', 'code', 'github', 'success', ?)", (adw_id + "_02_claim", adw_id, now))
     c.execute("INSERT INTO events (event_id, adw_id, phase_id, type, name, payload_json, started_at)"
               " VALUES (?, ?, ?, 'log', 'claim', ?, ?)",
-              (adw_id + "_e1", adw_id, adw_id + "_02_claim", json.dumps({"issue": url}), now))
+              (adw_id + "_" + str(os.getpid()), adw_id, adw_id + "_02_claim", json.dumps({"issue": url}), now))
 `;
 
 const COMMITS = { commits: true, resumes: false, mutually_exclusive: [], options: OPTIONS };
@@ -114,7 +121,7 @@ function repo(listReady: string | null = LIST_READY): Repo {
   return { root, db: path, port: nextPort() };
 }
 
-interface Listed { number: number; verdict: string; why?: string | null; run_instead?: object[] }
+interface Listed { number: number; verdict: string; why?: string | null; run_instead?: object[]; prs?: string[] }
 
 function listing(r: Repo, issues: Listed[], extra: object = {}): void {
   const full = issues.map((i) => ({
@@ -144,6 +151,28 @@ function claimedRun(r: Repo, adwId: string, number: number, status: string, star
     [`${adwId}_e1`, adwId, `${adwId}_02_claim`,
       JSON.stringify({ issue: `${ISSUE_URL}/${number}`, label: "agent-running", checklist: "none" }), startedAt]);
   db.close();
+}
+
+/** A phase of a Run in the trace that logged this payload, as worktree.enter and worktree.land log theirs. */
+function phaseLog(r: Repo, adwId: string, seq: number, name: string, payload: object): void {
+  const db = new Database(r.db);
+  db.run("INSERT INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)" +
+    " VALUES (?, ?, ?, ?, 'code', 'git', 'success', ?)", [`${adwId}_0${seq}_${name}`, adwId, seq, name, "2026-10-01T10:00:00+00:00"]);
+  db.run("INSERT INTO events (event_id, adw_id, phase_id, type, name, payload_json, started_at)" +
+    " VALUES (?, ?, ?, 'log', ?, ?, ?)",
+    [`${adwId}_${name}_log`, adwId, `${adwId}_0${seq}_${name}`, name, JSON.stringify(payload), "2026-10-01T10:00:00+00:00"]);
+  db.close();
+}
+
+/** A Run that worked in its own worktree, logged as worktree.enter logs it; kept on disk unless `kept` is false. */
+function worktreeOf(r: Repo, adwId: string, kept = true): string {
+  const path = join(`${r.root}.sssf-worktrees`, adwId);
+  if (kept) {
+    mkdirSync(path, { recursive: true });
+    onCleanup(() => rmSync(`${r.root}.sssf-worktrees`, { recursive: true, force: true }));
+  }
+  phaseLog(r, adwId, 3, "worktree", { path, branch: `sssf/${adwId}`, base: "main @ 0000000", reused: false });
+  return path;
 }
 
 const startConsole = (r: Repo) => serve([join("server", "index.ts"), "--db", r.db], r.port);
@@ -205,7 +234,7 @@ describe("the Ready issues", () => {
     await startConsole(r);
     const { body } = await issues(r);
     expect(body.issues.find((i) => i.number === 8)!.run).toEqual(
-      { adw_id: "new0run0", adw_name: "adw_full", status: "running" });
+      { adw_id: "new0run0", adw_name: "adw_full", status: "running", worktree: null, pr: null });
     expect(body.issues.find((i) => i.number === 9)!.run).toBeNull();
   });
 
@@ -293,5 +322,120 @@ describe("a Launch from an issue", () => {
     expect(look.body.holds_issue).toBe(false);
     expect((await issues(r)).body.issues[0]!.held_by).toBeNull();
     expect((await api(r, "/api/launches/preview", { adw: "adw_full", values: { prompt: "#4" } })).status).toBe(200);
+  });
+});
+
+/** The rerun line of a failed Run's outcome comment, as issues._outcome writes it. */
+const outcomeRerun = (name: string, number: number, adwId: string) => `uv run adws/${name}.py "#${number}" --adw-id ${adwId}`;
+const outcomeForce = (name: string, number: number) => `uv run adws/${name}.py "#${number}" --force`;
+
+describe("an issue whose latest Run failed", () => {
+  test("with its worktree kept offers Rerun with that Run's ADW and adw_id, beside a fresh Launch", async () => {
+    const r = repo();
+    listing(r, [{ number: 8, verdict: "runnable" }, { number: 9, verdict: "runnable" }]);
+    claimedRun(r, "fail0run", 8, "fail", "2026-10-01T10:00:00+00:00");
+    worktreeOf(r, "fail0run");
+    await startConsole(r);
+    const { body } = await issues(r);
+    const eight = body.issues.find((i) => i.number === 8)!;
+    expect(eight.verdict).toBe("runnable");   // a fresh Launch is still there
+    expect(eight.rerun).toEqual({ adw: "adw_full", adw_id: "fail0run", force: false, pr: null });
+    expect(body.issues.find((i) => i.number === 9)!.rerun).toBeNull();
+  });
+
+  test("offers no Rerun once its worktree is gone, or when a later Run of it succeeded", async () => {
+    const r = repo();
+    listing(r, [{ number: 8, verdict: "runnable" }, { number: 9, verdict: "runnable" }]);
+    claimedRun(r, "gone0run", 8, "fail", "2026-10-01T10:00:00+00:00");
+    worktreeOf(r, "gone0run", false);
+    claimedRun(r, "fail0run", 9, "fail", "2026-10-01T10:00:00+00:00");
+    worktreeOf(r, "fail0run");
+    claimedRun(r, "good0run", 9, "success", "2026-10-02T10:00:00+00:00");
+    await startConsole(r);
+    const { body } = await issues(r);
+    expect(body.issues.find((i) => i.number === 8)!.rerun).toBeNull();
+    expect(body.issues.find((i) => i.number === 9)!.rerun).toBeNull();
+  });
+
+  test("that left an open PR offers Rerun with --force, linking the PR", async () => {
+    const r = repo();
+    const pr = "https://github.com/acme/widgets/pull/31";
+    listing(r, [{ number: 7, verdict: "open_pr", why: `an open PR already closes #7: ${pr}`, prs: [pr] }]);
+    claimedRun(r, "pr00run0", 7, "fail", "2026-10-01T10:00:00+00:00");
+    phaseLog(r, "pr00run0", 9, "land", { pr, pr_repo: "acme/widgets" });
+    await startConsole(r);
+    const seven = (await issues(r)).body.issues[0]!;
+    expect(seven.rerun).toEqual({ adw: "adw_full", adw_id: null, force: true, pr });
+
+    const preview = await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_full", values: { prompt: "#7", force: true } });
+    expect(preview.status).toBe(200);
+    expect(preview.body.adw_id).not.toBe("pr00run0");
+    // The Console mints every Run's id, so it follows the outcome comment's command.
+    expect(preview.body.command).toBe(`${outcomeForce("adw_full", 7)} --adw-id ${preview.body.adw_id}`);
+
+    const started = await api<Launch>(r, "/api/launches",
+      { adw: "adw_full", values: { prompt: "#7", force: true }, adw_id: preview.body.adw_id });
+    expect(started.status).toBe(201);
+    expect(started.body.argv).toEqual(preview.body.argv);
+    expect(started.body.rerun).toBe(false);   // a fresh Run, not a join
+    expect(started.body.holds_issue).toBe(true);
+  });
+
+  test("reviews the exact rerun command of its outcome comment, then reruns under the same adw_id", async () => {
+    const r = repo();
+    listing(r, [{ number: 8, verdict: "runnable" }]);
+    claimedRun(r, "fail0run", 8, "fail", "2026-10-01T10:00:00+00:00");
+    worktreeOf(r, "fail0run");
+    await startConsole(r);
+    const rerun = { adw: "adw_full", values: { prompt: "#8" }, reruns: "fail0run" };
+
+    const preview = await api<LaunchPreview>(r, "/api/launches/preview", rerun);
+    expect(preview.status).toBe(200);
+    expect(preview.body.adw_id).toBe("fail0run");
+    expect(preview.body.command).toBe(outcomeRerun("adw_full", 8, "fail0run"));
+
+    const started = await api<Launch>(r, "/api/launches", rerun);
+    expect(started.status).toBe(201);
+    expect(started.body.adw_id).toBe("fail0run");
+    expect(started.body.rerun).toBe(true);
+    // The Run is already in the trace: the rerun is Starting until its own process joins it.
+    expect(started.body.state).toBe("starting");
+    expect(started.body.holds_issue).toBe(true);
+
+    const launch = async () => (await api<Launch[]>(r, "/api/launches")).body.find((l) => l.adw_id === "fail0run")!;
+    rmSync(join(r.root, "hold"), { force: true });
+    expect(await until(async () => (await launch()).state === "started", 30)).toBe(true);
+    // The old Run's Claim is in the trace already; the rerun holds the issue until its own lands.
+    expect((await launch()).holds_issue).toBe(true);
+    rmSync(join(r.root, "claim-hold"), { force: true });
+    expect(await until(async () => !(await launch()).holds_issue, 30)).toBe(true);
+  });
+
+  test("is rerun only with the ADW that ran it, and only once it has settled", async () => {
+    const r = repo();
+    claimedRun(r, "fail0run", 8, "fail", "2026-10-01T10:00:00+00:00");
+    claimedRun(r, "busy0run", 9, "running", "2026-10-01T10:00:00+00:00");
+    await startConsole(r);
+    const preview = (body: object) => api<{ error: string }>(r, "/api/launches/preview", body);
+
+    const other = await preview({ adw: "adw_short", values: { prompt: "#8" }, reruns: "fail0run" });
+    expect(other.status).toBe(400);
+    expect(other.body.error).toContain("adw_full");
+    expect((await preview({ adw: "adw_full", values: { prompt: "#9" }, reruns: "busy0run" })).status).toBe(409);
+    expect((await preview({ adw: "adw_full", values: { prompt: "#8" }, reruns: "nope0run" })).status).toBe(404);
+    expect((await preview({ adw: "adw_resume", values: { prompt: "#8" }, reruns: "fail0run" })).status).toBe(400);
+    expect((await preview({ adw: "adw_full", values: { prompt: "#8" }, reruns: "fail0run", adw_id: "x" })).status)
+      .toBe(400);
+  });
+
+  test("launches only the rerun command its preview showed", async () => {
+    const r = repo();
+    claimedRun(r, "fail0run", 8, "fail", "2026-10-01T10:00:00+00:00");
+    await startConsole(r);
+    const unseen = await api<{ error: string }>(r, "/api/launches",
+      { adw: "adw_full", values: { prompt: "#8" }, reruns: "fail0run" });
+    expect(unseen.status).toBe(409);
+    expect(unseen.body.error).toContain("review");
   });
 });

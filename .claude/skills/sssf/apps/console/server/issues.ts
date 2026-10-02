@@ -6,12 +6,13 @@
  * refresh, once a Launch's Claim lands — so nothing here polls GitHub.
  *
  * What the Console adds is its own: Runnable issues first, the Run whose
- * Claim logged each issue (from the trace), and a Launch of it whose Claim
- * hasn't landed yet.
+ * Claim logged each issue (from the trace), a Launch of it whose Claim
+ * hasn't landed yet, and the Rerun its failed Run's outcome comment offers.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { IssueListing, IssueRun, ReadyIssue } from "../shared/types.ts";
+import type { IssueListing, IssueRerun, IssueRun, ReadyIssue } from "../shared/types.ts";
+import { claimingAdw } from "../shared/issues.ts";
 
 const ISSUES = "adws/adw_modules/issues.py";
 // Past a first `uv run` resolving deps: one page of issues plus a read per issue.
@@ -30,6 +31,23 @@ export interface IssueContext {
 function unavailable(why: NonNullable<IssueListing["unavailable"]>): IssueListing {
   return { tracker: null, repo: null, ready_label: null, available: false,
     unavailable: why, issues: [], truncated: false };
+}
+
+/**
+ * The Rerun a failed (or stopped) Run's outcome comment tells the engineer to
+ * type (issues._outcome). One that left an open PR is started afresh with
+ * `--force`, since that PR is why a plain Launch would refuse; one that kept
+ * its worktree reruns under its own adw_id to pick it back up. Whether either
+ * may run is still the verdict's to say: Python's, never this.
+ */
+function rerunOf(issue: Omit<ReadyIssue, "run" | "rerun" | "held_by">, run: IssueRun | null): IssueRerun | null {
+  const adw = claimingAdw(run?.adw_name);
+  if (!run || !adw || (run.status !== "fail" && run.status !== "stopped")) return null;
+  if (run.pr && issue.verdict === "open_pr" && issue.prs.includes(run.pr)) {
+    return { adw, adw_id: null, force: true, pr: run.pr };
+  }
+  if (run.worktree && issue.verdict === "runnable") return { adw, adw_id: run.adw_id, force: false, pr: null };
+  return null;
 }
 
 export async function listReady(repoRoot: string, context: IssueContext): Promise<IssueListing> {
@@ -58,11 +76,12 @@ export async function listReady(repoRoot: string, context: IssueContext): Promis
 
   const runs = context.claimedRuns();
   const held = context.heldIssues();
-  const issues: ReadyIssue[] = listing.issues.map((issue) => ({
-    ...issue,
-    run: runs.get(issue.url) ?? null,
-    held_by: held.get(issue.number) ?? null,
-  }));
+  const issues: ReadyIssue[] = listing.issues.map((issue) => {
+    const logged = runs.get(issue.url);
+    // A worktree counts only while it is still on disk: one removed by hand can't be picked back up.
+    const run = logged ? { ...logged, worktree: logged.worktree && existsSync(logged.worktree) ? logged.worktree : null } : null;
+    return { ...issue, run, rerun: rerunOf(issue, run), held_by: held.get(issue.number) ?? null };
+  });
   // A stable sort: within each half, the order GitHub gave.
   issues.sort((a, b) => Number(b.verdict === "runnable") - Number(a.verdict === "runnable"));
   return { ...listing, issues };

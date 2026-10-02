@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import type { IssueLink, ReadyIssue } from '../lib/types'
+import type { IssueLink, IssueRerun, ReadyIssue } from '../lib/types'
 import { issues, issuesError, issuesLoading, loadIssuesOnce, refreshIssues } from '../lib/issues'
 import { launches } from '../lib/launches'
 import { hrefFor } from '../lib/router'
 
 defineProps<{ disabled: boolean }>()
-const emit = defineEmits<{ pick: [issue: ReadyIssue] }>()
+/** Pick launches it afresh; a Rerun follows what its failed Run's outcome comment says to type. */
+const emit = defineEmits<{ pick: [issue: ReadyIssue, rerun?: IssueRerun] }>()
 
 onMounted(loadIssuesOnce)
 
@@ -65,19 +66,29 @@ function jump(link: IssueLink, event: MouseEvent): void {
         :id="`ready-issue-${issue.number}`"
         :key="issue.number"
         class="row"
-        :class="{ greyed: !runnable(issue), flashed: flashed === issue.number }"
+        :class="{ greyed: !runnable(issue) && !issue.rerun, flashed: flashed === issue.number }"
       >
         <div class="line">
           <a class="number" :href="issue.url" target="_blank" rel="noopener">#{{ issue.number }}</a>
           <span class="title">{{ issue.title }}</span>
           <button
-            v-if="runnable(issue)"
+            v-if="issue.rerun"
             type="button"
             class="pick"
             :disabled="disabled || heldBy(issue) !== null"
+            :title="issue.rerun.force ? 'Start afresh despite the open PR its failed Run left' : 'Pick its failed Run’s kept worktree back up'"
+            @click="emit('pick', issue, issue.rerun)"
+          >
+            {{ issue.rerun.force ? 'Rerun with --force' : 'Rerun' }}
+          </button>
+          <button
+            v-if="runnable(issue)"
+            type="button"
+            :class="{ pick: !issue.rerun }"
+            :disabled="disabled || heldBy(issue) !== null"
             @click="emit('pick', issue)"
           >
-            Pick
+            {{ issue.rerun ? 'Fresh Launch' : 'Pick' }}
           </button>
         </div>
 
@@ -109,7 +120,11 @@ function jump(link: IssueLink, event: MouseEvent): void {
         </div>
 
         <div v-else-if="issue.verdict === 'open_pr'" class="reason" :title="issue.why ?? ''">
-          an open PR already closes it:
+          <template v-if="issue.rerun && issue.run">
+            Run <a :href="hrefFor(issue.run.adw_id)">{{ issue.run.adw_id }}</a> failed, leaving an open PR — fix it, or
+            rerun afresh:
+          </template>
+          <template v-else>an open PR already closes it:</template>
           <template v-for="(pr, n) in issue.prs" :key="pr">
             <a :href="pr" target="_blank" rel="noopener">{{ pr.replace(/^.*\/pull\//, 'PR #') }}</a>{{ n < issue.prs.length - 1 ? ', ' : '' }}
           </template>
@@ -120,6 +135,7 @@ function jump(link: IssueLink, event: MouseEvent): void {
         <div v-else-if="issue.run" class="reason last-run">
           last Run <a :href="hrefFor(issue.run.adw_id)">{{ issue.run.adw_id }}</a>{{ ' ' }}
           <span class="dim">({{ issue.run.status }})</span>
+          <template v-if="issue.rerun">— its worktree is kept, and Rerun picks it back up</template>
         </div>
       </li>
     </ul>

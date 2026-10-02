@@ -381,6 +381,12 @@ export interface LaunchRequest {
    * Such a Launch always needs its preview: there is no minted id to match.
    */
   continues?: string;
+  /**
+   * The settled Run whose kept worktree an issue's Rerun picks back up: the
+   * same ADW under that Run's own adw_id, as its outcome comment says to type.
+   * Like continues, it always needs its preview.
+   */
+  reruns?: string;
 }
 
 /** POST /api/launches/preview: what would run, so the engineer can confirm it. */
@@ -406,6 +412,8 @@ export interface Launch extends LaunchPreview {
   adw: string;
   /** A Resuming ADW continuing an existing Run: Starting until it joins that Run's trace. */
   continuing: boolean;
+  /** An issue's Rerun under its failed Run's adw_id: Starting, too, until it joins that Run's trace. */
+  rerun: boolean;
   state: LaunchState;
   started_at: string;
   exit_code: number | null;
@@ -440,6 +448,25 @@ export interface IssueRun {
   adw_id: string;
   adw_name: string | null;
   status: SessionStatus | null;
+  /** The worktree it logged, while that is still on disk: a failed Run keeps it for a Rerun. */
+  worktree: string | null;
+  /** The PR it landed, if it got that far. */
+  pr: string | null;
+}
+
+/**
+ * What an issue's failed Run says to do next, in its outcome comment: rerun
+ * the same ADW under its adw_id to pick its kept worktree back up, or — when
+ * it left an open PR — start afresh with `--force`.
+ */
+export interface IssueRerun {
+  /** The ADW the failed Run ran. */
+  adw: string;
+  /** The failed Run's adw_id to rerun under; null for a fresh `--force` Launch. */
+  adw_id: string | null;
+  force: boolean;
+  /** The open PR the failed Run left; set exactly when force is. */
+  pr: string | null;
 }
 
 export interface ReadyIssue {
@@ -458,6 +485,8 @@ export interface ReadyIssue {
   prs: string[];
   /** Added by the Console from the trace, never by GitHub. */
   run: IssueRun | null;
+  /** Offered when its latest Run failed and left a kept worktree or an open PR; a fresh Launch stays available. */
+  rerun: IssueRerun | null;
   /** The adw_id of a Launch holding this issue until its Claim lands: it can't be launched again yet. */
   held_by: string | null;
 }

@@ -12,7 +12,8 @@
  *
  * A Resuming ADW is launched only to continue a settled Run, under that Run's
  * adw_id, and its Launch is Starting until its own process joins that Run's
- * trace.
+ * trace. An issue's Rerun joins its failed Run the same way, with the ADW that
+ * Run ran, so it picks the kept worktree back up.
  *
  * Launches live in memory only. After a restart a Run is still found through
  * its session row; one that never wrote a row is simply forgotten.
@@ -26,15 +27,15 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session,
 } from "../shared/types.ts";
-import { issueNamed } from "../shared/issues.ts";
+import { claimingAdw, issueNamed } from "../shared/issues.ts";
 
 /** What Launches read back from the trace, which only the ADWs write (ADR 0001). */
 export interface Trace {
-  session(adwId: string): Pick<Session, "status"> | null;
+  session(adwId: string): Pick<Session, "status" | "adw_name"> | null;
   /** ADW processes recorded under a Run: one more means a Resuming ADW has joined it. */
   adwProcessCount(adwId: string): number;
-  /** Whether a Run's Claim phase has logged its issue: until then, nothing on the Tracker says it's taken. */
-  claimed(adwId: string): boolean;
+  /** How often a Run's Claim phase has logged its issue: until it logs again, nothing on the Tracker says it's taken. */
+  claimCount(adwId: string): number;
 }
 
 /** An error the route turns into this HTTP status rather than a 500. */
@@ -119,16 +120,23 @@ async function runDescribe(repoRoot: string, file: string): Promise<AdwDescripti
   return parsed;
 }
 
-/** POSIX single-quoting, so the shown command pastes into a terminal and means the same argv. */
+/**
+ * POSIX quoting, so the shown command pastes into a terminal and means the
+ * same argv. An issue reference is double-quoted, `"#42"`, as the ADWs' own
+ * outcome comments write it; anything else that needs quoting is single-quoted.
+ */
 export function shellQuote(arg: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg;
+  return /^[A-Za-z0-9_@%+=:,./#-]+$/.test(arg) ? `"${arg}"` : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
  * The ADW's arguments for these form values: its options in the order `--describe`
  * listed them, the minted id, then `--` and the positionals. After `--` argparse
  * reads a prompt such as "--help" as text, and a value that starts with "-" goes
- * as `--flag=value` for the same reason.
+ * as `--flag=value` for the same reason. An issue reference, which can't be read
+ * as an option, goes first instead: `"#42" --adw-id …`, the shape the ADWs'
+ * outcome comments give for a rerun.
  */
 function argsFor(info: AdwInfo, description: AdwDescription, values: LaunchRequest["values"], adwId: string): string[] {
   const known = new Map(description.options.map((o) => [o.name, o]));
@@ -170,6 +178,7 @@ function argsFor(info: AdwInfo, description: AdwDescription, values: LaunchReque
     if (v !== null) args.push(...(v.startsWith("-") ? [`${o.flag}=${v}`] : [o.flag!, v]));
   }
   args.push("--adw-id", adwId);
+  if (positionals.length === 1 && issueNamed(positionals[0]) !== null) return [positionals[0]!, ...args];
   return positionals.length ? [...args, "--", ...positionals] : args;
 }
 
@@ -198,8 +207,10 @@ interface Tracked {
   exited: boolean;
   /** Where this Launch's output begins in the log. */
   logFrom: number;
-  /** For a continuing Launch, the Run's ADW process count when it began; null for a fresh one. */
+  /** For a Launch joining a Run (continuing, or a Rerun), the Run's ADW process count when it began; null for a fresh one. */
   processesBefore: number | null;
+  /** The Run's Claims logged when it began: its own Claim is the next one. */
+  claimsBefore: number;
 }
 
 export class Launches {
@@ -263,11 +274,12 @@ export class Launches {
     if (typeof req?.adw !== "string" || typeof req.values !== "object" || req.values === null) {
       throw new HttpError(400, "a launch needs an adw and its values");
     }
-    const continues = req.continues;
-    if (continues !== undefined) {
-      if (typeof continues !== "string" || !ADW_ID.test(continues)) throw new HttpError(400, "invalid continues");
-      if (req.adw_id !== undefined) {
-        throw new HttpError(400, "a continuing Launch runs under the Run's own adw_id: send continues alone");
+    const { continues, reruns } = req;
+    for (const [field, runId] of [["continues", continues], ["reruns", reruns]] as const) {
+      if (runId === undefined) continue;
+      if (typeof runId !== "string" || !ADW_ID.test(runId)) throw new HttpError(400, `invalid ${field}`);
+      if (req.adw_id !== undefined || (continues !== undefined && reruns !== undefined)) {
+        throw new HttpError(400, `a Launch that ${field} a Run runs under the Run's own adw_id: send ${field} alone`);
       }
     }
     const catalog = await this.catalog();
@@ -284,14 +296,22 @@ export class Launches {
       throw new HttpError(400, `${info.name} isn't a Resuming ADW: it starts a fresh Run, so it can't continue ${continues}`);
     }
 
-    const adwId = continues ?? req.adw_id ?? randomBytes(4).toString("hex");
+    const joins = continues ?? reruns;
+    const adwId = joins ?? req.adw_id ?? randomBytes(4).toString("hex");
     if (!ADW_ID.test(adwId)) throw new HttpError(400, "invalid adw_id");
-    if (continues !== undefined) {
-      const run = this.trace.session(continues);
-      if (!run) throw new HttpError(404, `no Run ${continues} to continue`);
-      const entry = this.entries.get(continues);
+    if (joins !== undefined) {
+      const verb = continues !== undefined ? "continue" : "rerun";
+      const run = this.trace.session(joins);
+      if (!run) throw new HttpError(404, `no Run ${joins} to ${verb}`);
+      const entry = this.entries.get(joins);
       if (run.status === "running" || (entry && !entry.exited)) {
-        throw new HttpError(409, `${continues} is still running: continue it once it has settled`);
+        throw new HttpError(409, `${joins} is still running: ${verb} it once it has settled`);
+      }
+      // A Rerun picks up the failed Run's worktree, so it runs the ADW that claimed the issue.
+      const ran = claimingAdw(run.adw_name);
+      if (reruns !== undefined && ran !== info.name) {
+        throw new HttpError(400,
+          `${reruns} was a Run of ${ran ?? "an unrecorded ADW"}: rerun it with that ADW, or launch ${info.name} afresh`);
       }
     } else if (this.entries.has(adwId) || this.trace.session(adwId)) {
       throw new HttpError(409, `${adwId} is already a Run`);
@@ -317,7 +337,8 @@ export class Launches {
   async start(req: LaunchRequest): Promise<Launch> {
     const preview = await this.plan(req);
     const continuing = req.continues !== undefined;
-    if (req.adw_id !== undefined || continuing) {
+    const rerun = req.reruns !== undefined;
+    if (req.adw_id !== undefined || continuing || rerun) {
       const shown = this.previewed.get(preview.adw_id);
       if (!shown || shown.join("\0") !== preview.argv.join("\0")) {
         throw new HttpError(409, "this isn't the command you reviewed: review the new one before launching it");
@@ -327,13 +348,16 @@ export class Launches {
     mkdirSync(join(this.sessionsDir, preview.adw_id), { recursive: true });
     const logPath = this.logFile(preview.adw_id);
     // The Run's earlier output stays above; the full log says where this Launch begins.
-    if (continuing) appendFileSync(logPath, `\n[console] continuing with ${preview.command}\n`, "utf8");
+    if (continuing || rerun) {
+      appendFileSync(logPath, `\n[console] ${continuing ? "continuing" : "rerunning"} with ${preview.command}\n`, "utf8");
+    }
     const fd = openSync(logPath, "a");
     const entry: Tracked = {
-      launch: { ...preview, adw: req.adw, continuing, started_at: new Date().toISOString(), exit_code: null },
+      launch: { ...preview, adw: req.adw, continuing, rerun, started_at: new Date().toISOString(), exit_code: null },
       exited: false,
       logFrom: fstatSync(fd).size,
-      processesBefore: continuing ? this.trace.adwProcessCount(preview.adw_id) : null,
+      processesBefore: continuing || rerun ? this.trace.adwProcessCount(preview.adw_id) : null,
+      claimsBefore: this.trace.claimCount(preview.adw_id),
     };
     // Re-inserted, so a continued Run's Launch lists as the newest.
     this.entries.delete(preview.adw_id);
@@ -394,7 +418,7 @@ export class Launches {
     const state = joined ? "started" : entry.exited ? "refused" : "starting";
     // Between its row appearing and its Claim landing, the Tracker still calls the issue Runnable.
     const unclaimed = state === "started" && !entry.exited
-      && this.trace.session(adw_id)?.status === "running" && !this.trace.claimed(adw_id);
+      && this.trace.session(adw_id)?.status === "running" && this.trace.claimCount(adw_id) <= entry.claimsBefore;
     const holds_issue = entry.launch.issue !== null && (state === "starting" || unclaimed);
     const path = this.logPath(adw_id);
     return {
