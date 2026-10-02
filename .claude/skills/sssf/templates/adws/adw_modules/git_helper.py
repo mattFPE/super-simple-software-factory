@@ -196,6 +196,11 @@ def diff_text(base: str, repo: Repo = None) -> str:
 
 # ── remotes ──────────────────────────────────────────────────────────────────
 
+def origin_url(repo: Repo = None) -> str:
+    """The URL of the remote named `origin`. Raises RuntimeError when there is none."""
+    return _git("remote", "get-url", "origin", repo=repo)
+
+
 def origin_repo(repo: Repo = None) -> str:
     """`[HOST/]OWNER/REPO` of the remote a run's branch is pushed to.
 
@@ -204,7 +209,7 @@ def origin_repo(repo: Repo = None) -> str:
     `gh pr create` would open the PR on someone else's project — and a bare
     `gh issue view 42` would read someone else's issue.
     """
-    url = _git("remote", "get-url", "origin", repo=repo)
+    url = origin_url(repo)
     # https://host/o/r(.git) · ssh://git@host/o/r · git@host:o/r — scheme and user optional
     match = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/]([^/]+)/([^/]+?)(?:\.git)?/?$", url)
     if not match:

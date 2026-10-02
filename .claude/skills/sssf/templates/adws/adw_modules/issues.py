@@ -1,3 +1,6 @@
+# /// script
+# dependencies = ["pydantic", "python-dotenv", "pyyaml", "rich"]
+# ///
 """A GitHub issue as a run's request: read it, decide it may run, claim it, report back.
 
 Specs come from /to-spec and tickets from /to-tickets (mattpocock/skills); both
@@ -25,17 +28,32 @@ leaves the ready label where it was, so a rerun is just a rerun.
 
 Everything goes through `gh api` against origin's repository, never gh's
 default, which in a fork is the parent (see git_helper.origin_repo).
+
+This file is also the command line the Console lists a repo's Ready issues
+with, each with the verdict a Launch would reach; the Console never asks
+GitHub itself:
+
+    uv run adws/adw_modules/issues.py --list-ready [--json]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from pathlib import Path
+
+if __name__ == "__main__" and not __package__:
+    # A script has no package, so re-enter through adw_modules (see main) —
+    # here, before the relative imports below, which would fail without one.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from adw_modules import issues
+    sys.exit(issues.main())
 
 from . import git_helper, worktree
 from .data_types import Issue, IssueLink, PhaseParams, RunOptions
@@ -49,6 +67,8 @@ MARKER = "<!-- sssf -->"                   # on our own comments, so they are ne
 CHECKLIST_HEADING = "Review checklist"     # what gates.checklist_covered reads back
 CHECKLIST_SOURCES = ("Acceptance criteria", "User Stories")   # a ticket's, else a spec's
 TAIL_CHARS = 1500
+LIST_LIMIT = 50                            # the most Ready issues --list-ready reports
+LIST_PAGE = 100                            # GitHub's largest page: the one --list-ready reads
 
 _NUMBER = re.compile(r"^#(\d+)$")
 _URL = re.compile(r"^https?://([^/\s]+)/([^/\s]+)/([^/\s]+)/issues/(\d+)/?(?:[?#]\S*)?$")
@@ -79,12 +99,10 @@ def parse_ref(arg: str) -> tuple[str | None, int] | None:
 def load(arg: str) -> Issue:
     """The issue `arg` names, read once per process — prompt and options share it."""
     named_repo, number = parse_ref(arg)
-    if not shutil.which("gh", path=operator_env().get("PATH")):
-        raise SystemExit("an issue as the prompt needs the GitHub CLI (`gh`) on PATH")
     try:
-        repo = git_helper.origin_repo()
-    except RuntimeError as error:
-        raise SystemExit(f"an issue as the prompt needs a remote named `origin`: {error}")
+        repo = github_repo()
+    except Unavailable as why:
+        raise SystemExit(f"an issue as the prompt needs GitHub, but {why}")
     if named_repo and named_repo.casefold() != repo.casefold():
         raise SystemExit(f"{arg} is on {named_repo}, but this checkout's origin is {repo}. "
                          "A run's PR goes to origin, so it can only close origin's issues.")
@@ -92,6 +110,44 @@ def load(arg: str) -> Issue:
         return _read(repo, number)
     except RuntimeError as error:
         raise SystemExit(f"cannot read issue #{number} on {repo}: {error}")
+
+
+class Unavailable(Exception):
+    """Why this checkout cannot reach its GitHub issues, and what to do about it."""
+
+    def __init__(self, reason: str, fix: str):
+        super().__init__(f"{reason}. {fix}")
+        self.reason, self.fix = reason, fix
+
+
+def github_repo() -> str:
+    """Origin's `[HOST/]OWNER/REPO`, once `gh` can reach it. Raises Unavailable."""
+    env = operator_env()
+    gh = shutil.which("gh", path=env.get("PATH"))
+    if not gh:
+        raise Unavailable("the GitHub CLI (`gh`) is not on PATH",
+                          "Install it from https://cli.github.com, then run `gh auth login`.")
+    try:
+        url = git_helper.origin_url()
+    except RuntimeError:
+        raise Unavailable("this checkout has no remote named `origin`",
+                          "Add its GitHub repository: `git remote add origin <url>`.")
+    try:
+        repo = git_helper.origin_repo()
+    except RuntimeError:
+        raise Unavailable(f"`origin` ({url}) is not on GitHub",
+                          "Point it at the repository on GitHub: `git remote set-url origin <url>`.")
+    host = _split(repo)[0] or "github.com"
+    status = subprocess.run([gh, "auth", "status", "--hostname", host], capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", env=env)
+    if status.returncode == 0:
+        return repo
+    if host == "github.com":
+        raise Unavailable("`gh` is not logged in to github.com", "Run `gh auth login`.")
+    # Any other host is GitHub Enterprise only if gh can log in to it.
+    raise Unavailable(f"`origin` is on {host}, which is not on GitHub, or not a GitHub "
+                      "Enterprise host `gh` is logged in to",
+                      f"Point `origin` at GitHub, or run `gh auth login --hostname {host}`.")
 
 
 def _read(repo: str, number: int) -> Issue:
@@ -109,10 +165,17 @@ def _read(repo: str, number: int) -> Issue:
         parent_body=_text(parent.get("body")) if parent else "",
         comments=_comments(repo, number) if raw.get("comments") else [],
         checklist=checklist, checklist_source=source,
+        **_verdict_fields(repo, raw, body))
+
+
+def _verdict_fields(repo: str, raw: dict, body: str) -> dict:
+    """What `problems` rules on beyond the issue itself: its tickets, blockers, open PRs."""
+    path = f"repos/{_slug(repo)}/issues/{raw['number']}"
+    return dict(
         tickets=([_link(item) for item in _api_list(f"{path}/sub_issues", repo)]
                  if (raw.get("sub_issues_summary") or {}).get("total") else []),
         blockers=_blockers(repo, raw, body),
-        open_prs=_open_prs(repo, number))
+        open_prs=_open_prs(repo, raw["number"]))
 
 
 def ready_label() -> str:
@@ -198,33 +261,114 @@ def require_ready(issue: Issue) -> None:
 
 def require_runnable(issue: Issue, force: bool = False) -> None:
     """For a run that ends in a commit: everything that makes it the wrong issue to work now."""
-    problems = []
+    found = problems(issue, force)
+    if found:
+        raise SystemExit("\n".join(problem["why"] for problem in found))
+
+
+def problems(issue: Issue, force: bool = False) -> list[dict]:
+    """Why `issue` is not Runnable, in the order require_runnable prints them: each
+    a `verdict`, the `why` it says, and the issues or PRs involved. Empty when it is
+    Runnable. --list-ready reports the first, so it and a Launch never disagree."""
+    found = []
     if issue.state != "open":
-        problems.append(f"#{issue.number} is {issue.state}.")
+        found.append(dict(verdict="closed", why=f"#{issue.number} is {issue.state}."))
     if issue.tickets:
-        listing = "\n".join(f"  #{t.number} {t.title} — {_ticket_state(t, issue)}"
-                            for t in issue.tickets)
-        problems.append(f"#{issue.number} is a spec split into {len(issue.tickets)} "
-                        f"ticket(s). Run a ticket instead:\n{listing}")
+        states = [(t, _ticket_state(t, issue)) for t in issue.tickets]
+        listing = "\n".join(f"  #{t.number} {t.title} — {state}" for t, state in states)
+        found.append(dict(
+            verdict="spec", tickets=issue.tickets,
+            run_instead=[t for t, state in states if state == "ready"],
+            why=f"#{issue.number} is a spec split into {len(issue.tickets)} "
+                f"ticket(s). Run a ticket instead:\n{listing}"))
     waiting = [b for b in issue.blockers if b.state == "open"]
     if waiting:
         listing = "\n".join(f"  #{b.number} {b.title}" for b in waiting)
-        problems.append(f"#{issue.number} is blocked by {len(waiting)} open issue(s); it can "
-                        f"start once they are closed:\n{listing}")
+        found.append(dict(
+            verdict="blocked", blocked_by=waiting,
+            why=f"#{issue.number} is blocked by {len(waiting)} open issue(s); it can "
+                f"start once they are closed:\n{listing}"))
     if not force and RUNNING_LABEL in issue.labels:
-        problems.append(f"#{issue.number} is labelled `{RUNNING_LABEL}`: another run has it. "
-                        "If that run is dead (a hard kill leaves the label), pass --force.")
+        found.append(dict(
+            verdict="claimed",
+            why=f"#{issue.number} is labelled `{RUNNING_LABEL}`: another run has it. "
+                "If that run is dead (a hard kill leaves the label), pass --force."))
     if not force and issue.open_prs:
-        problems.append(f"an open PR already closes #{issue.number}: "
-                        f"{', '.join(issue.open_prs)}. Pass --force to run it again anyway.")
-    if problems:
-        raise SystemExit("\n".join(problems))
+        found.append(dict(
+            verdict="open_pr", prs=issue.open_prs,
+            why=f"an open PR already closes #{issue.number}: "
+                f"{', '.join(issue.open_prs)}. Pass --force to run it again anyway."))
+    return found
 
 
 def _ticket_state(ticket: IssueLink, spec: Issue) -> str:
     if ticket.state != "open":
         return ticket.state
     return "ready" if spec.ready_label in ticket.labels else f"not labelled {spec.ready_label}"
+
+
+# ── list the Ready ones ──────────────────────────────────────────────────────
+
+def list_ready() -> dict:
+    """This repo's open Ready issues, each with the verdict a Launch would reach.
+
+    Never raises for a repo whose issues it cannot reach: `available` is false
+    and `unavailable` says why in one line, and what to do about it.
+    """
+    label = ready_label()
+    report = dict(tracker="GitHub",              # the only Tracker sssf reads, for now
+                  repo=None, ready_label=label, available=False,
+                  unavailable=None, issues=[], truncated=False)
+    try:
+        repo = report["repo"] = github_repo()
+        page = _api(f"repos/{_slug(repo)}/issues", repo, "-f", "state=open",
+                    "-f", f"labels={label}", "-F", f"per_page={LIST_PAGE}")
+        found = [raw for raw in page if "pull_request" not in raw]   # PRs share the endpoint
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            report["issues"] = list(pool.map(lambda raw: _listed(repo, raw, label),
+                                             found[:LIST_LIMIT]))
+    except Unavailable as why:
+        report["unavailable"] = dict(reason=why.reason, fix=why.fix)
+        return report
+    except (RuntimeError, json.JSONDecodeError) as error:
+        report["unavailable"] = dict(
+            reason=f"cannot read the issues on {report['repo']}: {' '.join(str(error).split())}",
+            fix="Check `gh auth status` and your connection, then refresh.")
+        return report
+    # One page: a full one may have had more behind it.
+    report["truncated"] = len(found) > LIST_LIMIT or len(page) == LIST_PAGE
+    _only_runnable_tickets(report["issues"])
+    report["available"] = True
+    return report
+
+
+def _only_runnable_tickets(listed: list[dict]) -> None:
+    """Narrow each Spec's `run_instead` to Tickets the listing itself found Runnable.
+
+    `problems` can only see a Ticket's labels; whether it is blocked or has an
+    open PR is in its own row. A Ticket past the listing's end keeps its place.
+    """
+    verdicts = {item["number"]: item["verdict"] for item in listed}
+    for item in listed:
+        item["run_instead"] = [t for t in item["run_instead"]
+                               if verdicts.get(t["number"], "runnable") == "runnable"]
+
+
+def _listed(repo: str, raw: dict, label: str) -> dict:
+    """One Ready issue as --list-ready reports it: the first of its problems, if any."""
+    body = _text(raw.get("body"))
+    issue = Issue(repo=repo, number=raw["number"], title=raw["title"], url=raw["html_url"],
+                  state=raw["state"], body=body, labels=_labels(raw), ready_label=label,
+                  **_verdict_fields(repo, raw, body))
+    first = next(iter(problems(issue)), {})
+
+    def links(key: str) -> list[dict]:
+        return [link.model_dump() for link in first.get(key, [])]
+
+    return dict(number=issue.number, title=issue.title, url=issue.url,
+                verdict=first.get("verdict", "runnable"), why=first.get("why"),
+                blocked_by=links("blocked_by"), tickets=links("tickets"),
+                run_instead=links("run_instead"), prs=first.get("prs", []))
 
 
 # ── the prompt ───────────────────────────────────────────────────────────────
@@ -459,3 +603,25 @@ def _api_list(path: str, repo: str) -> list[dict]:
     if done.returncode != 0:
         raise RuntimeError(f"gh api {path}: {done.stderr.strip()[-TAIL_CHARS:]}")
     return [item for page in json.loads(done.stdout or "[]") for item in page]
+
+
+# ── the command line ─────────────────────────────────────────────────────────
+
+def main(argv: list[str] | None = None) -> int:
+    """The command line. It prints: no Run is here to report through."""
+    parser = argparse.ArgumentParser(prog="issues.py", description="This repo's issues.")
+    parser.add_argument("--list-ready", action="store_true", required=True,
+                        help=f"list up to {LIST_LIMIT} open Ready issues, each with its verdict")
+    parser.add_argument("--json", action="store_true", help="print the listing as JSON")
+    args = parser.parse_args(argv)
+    listing = list_ready()
+    if args.json:
+        print(json.dumps(listing))
+    elif not listing["available"]:
+        print(f"{listing['unavailable']['reason']}. {listing['unavailable']['fix']}")
+    else:
+        for item in listing["issues"]:
+            print(f"#{item['number']} {item['title']} — {item['verdict']}")
+        if listing["truncated"]:
+            print(f"(only the first {LIST_LIMIT} are listed)")
+    return 0
