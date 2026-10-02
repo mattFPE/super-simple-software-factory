@@ -56,6 +56,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from pathlib import Path
+from typing import NamedTuple
 
 if __name__ == "__main__" and not __package__:
     # A script has no package, so re-enter through adw_modules (see main) —
@@ -316,8 +317,9 @@ def _checklist(body: str) -> tuple[list[str], str]:
 # `problems` rules on both alike:
 #
 #   Status: <s>        labels [s] — readiness is the Status equalling the ready
-#                      label; `agent-running` (a Claim) also keeps the ready one,
-#                      which the Claim replaced and will restore
+#                      label, ignoring case as GitHub's labels do; `agent-running`
+#                      (a Claim) also keeps the ready one, which the Claim
+#                      replaced and will restore
 #   Status: resolved   state "resolved", the only Status that clears a blocker
 #   Blocked by: ...    numbers name NN-*.md in the same folder, titles name their
 #                      `# NN — <title>` heading, ignoring case; one that names
@@ -339,20 +341,20 @@ def _local_issue(root: Path, path: str, label: str) -> Issue:
     spec = file.name == "spec.md"
     parent = None if spec else file.parent.parent / "spec.md"
     parent = parent if parent and parent.is_file() else None
-    checklist, source = _checklist(doc["body"])
+    checklist, source = _checklist(doc.body)
     if not checklist:                     # /to-tickets' local template: bare checkboxes
-        items = [line for line in doc["body"].splitlines() if re.match(r"^[-*+]\s+\[[ xX]\]", line)]
+        items = [line for line in doc.body.splitlines() if re.match(r"^[-*+]\s+\[[ xX]\]", line)]
         checklist, source = (_items("\n".join(items)), "Acceptance criteria") if items else ([], "")
     return Issue(
-        number=_ticket_number(file), path=path, url=path, title=doc["title"],
-        state=_local_state(doc["status"]), body=doc["body"],
-        labels=_local_labels(doc["status"], label), ready_label=label,
+        number=_ticket_number(file), path=path, url=path, title=doc.title,
+        state=_local_state(doc.status), body=doc.body,
+        labels=_local_labels(doc.status, label), ready_label=label,
         parent=_local_link(root, parent, label) if parent else None,
-        parent_body=_local_doc(parent)["body"] if parent else "",
-        comments=doc["comments"], checklist=checklist, checklist_source=source,
+        parent_body=_local_doc(parent).body if parent else "",
+        comments=doc.comments, checklist=checklist, checklist_source=source,
         tickets=([_local_link(root, t, label) for t in _ticket_files(file.parent / "issues")]
                  if spec else []),
-        blockers=_local_blockers(root, file.parent, doc["blocked_by"], label))
+        blockers=_local_blockers(root, file.parent, doc.blocked_by, label))
 
 
 def _local_ready(label: str) -> list[Issue]:
@@ -365,24 +367,30 @@ def _local_ready(label: str) -> list[Issue]:
     files += [t for folder in sorted(scratch.glob("*/issues")) for t in _ticket_files(folder)]
     found = []
     for file in sorted(files, key=lambda f: f.relative_to(root).as_posix()):
-        if label in _local_labels(_local_doc(file)["status"], label):
+        if label in _local_labels(_local_doc(file).status, label):
             found.append(_local_issue(root, file.relative_to(root).as_posix(), label))
     return found
 
 
-def _local_doc(file: Path) -> dict:
-    """What a local issue file says: its title, Status, blockers, body and comments."""
+class LocalDoc(NamedTuple):
+    """What a local issue file says."""
+    title: str
+    status: str                           # "" without a Status: line
+    body: str                             # everything but its ## Comments
+    comments: list[str]                   # sssf's own left out
+    blocked_by: list[str]                 # each entry as written: a line's value, or an item
+
+
+def _local_doc(file: Path) -> LocalDoc:
     text = _text(file.read_text(encoding="utf-8"))
     body, comments = _split_comments(text)
     heading = next((m.group(2) for line in body.splitlines()
                     if (m := _HEADING.match(line)) and len(m.group(1)) == 1), "")
     title = re.sub(r"^\d+\s*[—–-]+\s*", "", heading) or file.stem
-    blocked = _field(body, "Blocked by")
-    refs = [] if blocked is None or _is_none(blocked) else re.split(r"[,;&]|\band\b", blocked)
-    refs += [item for item in _items(_section(body, "Blocked by")) if not _is_none(item)]
-    refs = [ref.strip().strip("*`._ ").strip() for ref in refs]
-    return dict(title=title, status=_field(body, "Status") or "", body=body.strip(),
-                comments=comments, blocked_by=[ref for ref in refs if ref])
+    blocked = [_field(body, "Blocked by") or ""] + _items(_section(body, "Blocked by"))
+    return LocalDoc(title=title, status=_field(body, "Status") or "", body=body.strip(),
+                    comments=comments,
+                    blocked_by=[entry for entry in blocked if entry.strip() and not _is_none(entry)])
 
 
 def _split_comments(text: str) -> tuple[str, list[str]]:
@@ -446,36 +454,54 @@ def _ticket_number(file: Path) -> int | None:
 
 
 def _local_state(status: str) -> str:
-    return RESOLVED if status == RESOLVED else "open"
+    return RESOLVED if status.casefold() == RESOLVED else "open"
 
 
 def _local_labels(status: str, label: str) -> list[str]:
-    if status == RUNNING_LABEL:
+    """A Status as labels, ignoring case as GitHub's label names do."""
+    if status.casefold() == RUNNING_LABEL:
         return [label, RUNNING_LABEL]     # a Claim stands in for the ready Status it replaced
+    if status.casefold() == label.casefold():
+        return [label]
     return [status] if status else []
 
 
 def _local_link(root: Path, file: Path, label: str) -> IssueLink:
     doc = _local_doc(file)
     path = file.relative_to(root).as_posix()
-    return IssueLink(number=_ticket_number(file), title=doc["title"], url=path, path=path,
-                     state=_local_state(doc["status"]),
-                     labels=_local_labels(doc["status"], label))
+    return IssueLink(number=_ticket_number(file), title=doc.title, url=path, path=path,
+                     state=_local_state(doc.status), labels=_local_labels(doc.status, label))
 
 
-def _local_blockers(root: Path, folder: Path, refs: list[str], label: str) -> list[IssueLink]:
-    """Each `Blocked by:` reference as the Ticket it names in `folder`, or as missing."""
+def _local_blockers(root: Path, folder: Path, entries: list[str], label: str) -> list[IssueLink]:
+    """Each `Blocked by:` reference as the Ticket it names in `folder`, or as missing.
+
+    An entry that is one Ticket's whole title names it, commas and all; any other
+    is a list — `01, 02`, `01 and 02` — of numbers or titles.
+    """
     tickets = [_local_link(root, file, label) for file in _ticket_files(folder)]
-    found: dict[str, IssueLink] = {}
-    for ref in refs:
+
+    def named(ref: str) -> IssueLink | None:
         number = re.match(r"^#?(\d+)\b", ref)
-        match = next((t for t in tickets
-                      if (t.number == int(number.group(1)) if number
-                          else _title_key(t.title) == _title_key(ref))), None)
-        link = match or IssueLink(number=int(number.group(1)) if number else None,
-                                  title=ref, state="missing")
-        found.setdefault(link.path or ref, link)
+        return next((t for t in tickets
+                     if (t.number == int(number.group(1)) if number
+                         else _title_key(t.title) == _title_key(ref))), None)
+
+    found: dict[str, IssueLink] = {}
+    for entry in entries:
+        whole = _ref_text(entry)
+        titled = any(_title_key(t.title) == _title_key(whole) for t in tickets)
+        refs = [whole] if titled else [_ref_text(r) for r in re.split(r"[,;&]|\band\b", entry)]
+        for ref in filter(None, refs):
+            number = re.match(r"^#?(\d+)\b", ref)
+            link = named(ref) or IssueLink(number=int(number.group(1)) if number else None,
+                                           title=ref, state="missing")
+            found.setdefault(link.path or ref, link)
     return list(found.values())
+
+
+def _ref_text(text: str) -> str:
+    return text.strip().strip("*`._ ").strip()
 
 
 # ── may it run ───────────────────────────────────────────────────────────────

@@ -300,6 +300,28 @@ class LocalIssuesTest(unittest.TestCase):
         self.assertEqual(issue["verdicts"], ["blocked"])
         self.assertIn("02-paint-the-widget.md", issue["why"])
 
+    def test_a_title_with_a_comma_names_one_ticket(self):
+        self.widgets()
+        self.write(".scratch/widgets/issues/08-dry.md", ticket(8, "Paint, then dry", READY))
+        self.write(".scratch/widgets/issues/09-buff.md",
+                   ticket(9, "Buff", READY, blocked_by="paint, then dry"))
+
+        issue = self.load(".scratch/widgets/issues/09-buff.md")
+
+        self.assertEqual([b["path"] for b in issue["blockers"]], [".scratch/widgets/issues/08-dry.md"])
+
+    def test_statuses_are_read_ignoring_case(self):
+        self.widgets()
+        self.write(".scratch/widgets/issues/01-add-the-widget.md",
+                   ticket(1, "Add the widget", "Resolved"))
+        self.write(".scratch/widgets/issues/02-paint-the-widget.md",
+                   ticket(2, "Paint the widget", READY.upper(), blocked_by="01"))
+
+        issue = self.load(".scratch/widgets/issues/02-paint-the-widget.md")
+
+        self.assertEqual(issue["verdicts"], [])
+        self.assertIn(READY, issue["labels"])
+
     def test_a_missing_blocked_by_line_means_unblocked(self):
         self.widgets()
         self.write(".scratch/widgets/issues/08-free.md", ticket(8, "Free", READY))
