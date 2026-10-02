@@ -295,8 +295,9 @@ def _outcome(run, opts: RunOptions, ok: bool) -> str:
     error = (failed.error or "") if failed else ""
     if ok:
         lines = [f"✅ {who} finished, and its work was accepted."]
-    elif failed and error.isdigit():     # SystemExit(128 + signal): stopped, not broken
-        lines = [f"⏹️ {who} was stopped during `{failed.params.name}`."]
+    elif run.stopped:                    # stopped, not broken: a kill, Ctrl+C, the Console's Stop
+        during = f" during `{failed.params.name}`" if failed else ""
+        lines = [f"⏹️ {who} was stopped{during}."]
     elif failed:
         lines = [f"❌ {who} failed in `{failed.params.name}`.",
                  f"```\n{error[-TAIL_CHARS:]}\n```"]

@@ -5,6 +5,7 @@
  *
  * It also launches ADWs (server/launches.ts). A Launch spawns the ADW, and the
  * ADW's own tracer writes the trace; the Console only reads it back (ADR 0001).
+ * Stop runs the factory's own verified kill, procs.py (server/stop.ts).
  *
  * There is no ingest endpoint and no websocket. The data path is
  * agents → sqlite → web ui, and the UI gets there by polling. It listens on
@@ -18,6 +19,7 @@ import { existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { SssfDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
+import { stopRun } from "./stop.ts";
 import type { AgentPrompts, ApiError, HealthResponse, LaunchRequest } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
@@ -189,6 +191,12 @@ const server = Bun.serve({
           ? json({ adw_id: adwId, archived })
           : notFound(`no session ${adwId}`);
       }),
+    },
+
+    // Stop a running Run with the factory's verified kill. The Run settles its
+    // own trace; only one that can't is closed by procs.py, never by this server.
+    "/api/sessions/:adw_id/stop": {
+      POST: safely(async (req) => json(await stopRun(launches.repoRoot, db.path, param(req, "adw_id")))),
     },
 
     "/api/sessions/:adw_id/events": safely((req) =>

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { Check, Circle, LoaderCircle, X } from 'lucide-vue-next'
+import { Check, Circle, LoaderCircle, Square, X } from 'lucide-vue-next'
 
 defineProps<{ status: string }>()
 
 const ICONS: Record<string, unknown> = {
   success: Check,
   fail: X,
+  stopped: Square,
   running: LoaderCircle,
   queued: Circle,
 }
@@ -47,6 +48,12 @@ const ICONS: Record<string, unknown> = {
   border-color: rgba(255, 111, 103, 0.45);
   background: rgba(255, 111, 103, 0.09);
   box-shadow: 0 0 12px rgba(255, 111, 103, 0.12);
+}
+
+.chip.stopped {
+  color: var(--amber);
+  border-color: rgba(232, 182, 74, 0.45);
+  background: rgba(232, 182, 74, 0.09);
 }
 
 .chip.running {

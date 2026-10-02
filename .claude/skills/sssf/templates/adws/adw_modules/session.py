@@ -7,19 +7,22 @@ minted and printed so the next ADW can pick it up.
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import atexit
 import json
 import os
 import signal
 import sys
+import threading
+import time
 from pathlib import Path
 
-from . import issues
+from . import issues, procs
 from .data_types import RunOptions, SSSFConfig
 from .runner import Run
 from .tracer import Tracer
-from .utils import engineer_name, new_id, pid_alive
+from .utils import engineer_name, new_id
 
 
 def _finalize_when_killed(run: Run) -> None:
@@ -30,21 +33,47 @@ def _finalize_when_killed(run: Run) -> None:
     its process rows open — the trace would claim work is in flight that is
     already dead. Turning the signal into SystemExit both finalizes here and
     lets the phase context manager record the phase as failed on the way out.
+    The Run settles as `stopped`, not `fail`: nothing broke, someone ended it.
     """
     def handler(signum, _frame):
-        run.tracer.session_finish(run.adw_id, ok=False)   # also closes process rows
+        if run.stopped:
+            return                        # already on the way out: a second Ctrl+C, say
+        run.stopped = True
+        run.tracer.session_finish(run.adw_id, ok=False, stopped=True)   # also closes process rows
         raise SystemExit(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, handler)
+    _stop_when_requested(run)
 
     def on_exit() -> None:
         # Anything that ends the interpreter without run.finish() — an exception
         # between phases, a bug in the ADW script — still closes the trace.
         if not run.finalized:
-            run.tracer.session_finish(run.adw_id, ok=False)
+            run.tracer.session_finish(run.adw_id, ok=False, stopped=run.stopped)
             run.settle(ok=False)          # e.g. an issue's claim is still released
     atexit.register(on_exit)
+
+
+def _stop_when_requested(run: Run) -> None:
+    """Treat a stop request in the session dir as SIGTERM (`procs.stop`).
+
+    On Windows a signal can't reach a detached process without killing it, so
+    this is how the Console's Stop and `just kill` reach the Run there. Removing
+    the file is the acknowledgement `procs.stop` waits for before it kills the
+    agents. The handler runs as soon as the main thread is back in Python,
+    which a killed agent's closed output makes it.
+    """
+    request = run.session_dir / procs.STOP_REQUEST
+    request.unlink(missing_ok=True)       # an unheard request left for an earlier ADW
+
+    def watch() -> None:
+        while not request.exists():
+            time.sleep(0.25)
+        request.unlink(missing_ok=True)
+        _thread.interrupt_main(signal.SIGTERM)
+
+    threading.Thread(target=watch, name="sssf-stop-request", daemon=True).start()
 
 
 def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
@@ -53,7 +82,7 @@ def ensure(cfg: SSSFConfig, adw_id: str | None = None) -> Run:
                     f"{cfg.defaults.data_dir}/sessions/{adw_id}/events.jsonl")
     # Runs that died without closing their trace (hard kill, crash, reboot)
     # would read `running` forever; every new run sweeps them first.
-    abandoned = tracer.reap_abandoned(pid_alive)
+    abandoned = tracer.reap_abandoned(procs.pid_alive)
     run = Run(cfg=cfg, adw_id=adw_id, tracer=tracer, engineer=engineer_name())
     tracer.session_start(adw_id, run.engineer, adw_name=Path(sys.argv[0]).stem)
     # This process is the run. Record it before any phase opens, so a run that

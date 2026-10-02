@@ -11,6 +11,7 @@ import type {
   PromptsResponse,
   SessionDetail,
   SessionSummary,
+  StopReport,
 } from './types'
 
 async function getJson(url: string): Promise<unknown> {
@@ -115,4 +116,9 @@ export async function fetchLaunchLog(adwId: string): Promise<string> {
   if (res.status === 404) return ''
   if (!res.ok) throw new Error(`GET ${url} → ${res.status}`)
   return res.text()
+}
+
+/** Stop a running Run with the factory's verified kill (procs.py stop). */
+export function stopRun(adwId: string): Promise<StopReport> {
+  return postJson(`/api/sessions/${encodeURIComponent(adwId)}/stop`, {}) as Promise<StopReport>
 }

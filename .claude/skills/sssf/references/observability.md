@@ -51,7 +51,7 @@ The gate event payload carries `attempt` too, so the `gate_results` table and th
 sessions (
   adw_id        TEXT PRIMARY KEY,
   request       TEXT,              -- the engineer's ask
-  status        TEXT,              -- running | success | fail
+  status        TEXT,              -- running | success | fail | stopped (ended on request)
   engineer      TEXT,
   started_at    TEXT, ended_at TEXT,
   total_tokens  INTEGER, total_cost REAL
@@ -127,7 +127,7 @@ agent_sessions (                   -- the queryable mirror of agent_map.json
 );
 ```
 
-**A hung agent emits nothing**, which is exactly when you need its pid: no events, no tokens, no output to read. `processes` is the only table that can answer "what is this run running, and how do I stop it" — `just procs <adw_id>` lists what is live, `just kill <adw_id>` stops children before the parent, and both verify the recorded `command` still matches the pid before signalling it. A killed run finalizes its own trace: SIGTERM and SIGINT are turned into `SystemExit` in `session.ensure`, so the session lands on `fail` with its process rows closed instead of reading `running` forever.
+**A hung agent emits nothing**, which is exactly when you need its pid: no events, no tokens, no output to read. `processes` is the only table that can answer "what is this run running, and how do I stop it" — `just procs <adw_id>` lists what is live, and `just kill <adw_id>` (`adw_modules/procs.py stop`, which the Console's Stop runs too) stops children before the parent, checking each pid's live command line against the recorded `command` first and never signalling one that no longer matches. A stopped run finalizes its own trace: SIGTERM and SIGINT are turned into `SystemExit` in `session.ensure`, so the session lands on `stopped` with its process rows closed instead of reading `running` forever. On Windows, where no signal reaches a process without killing it, the stop writes `sessions/<adw_id>/stop`; the run's watcher acknowledges it and stops the same way. A run that can't settle itself in time is killed, and the stop closes its trace as `stopped` for it.
 
 **Derived, never stored:** phase durations (`ended_at − started_at`), session phase-progress (query `phases` by `adw_id`), lane layout (`kind` + `owner`).
 

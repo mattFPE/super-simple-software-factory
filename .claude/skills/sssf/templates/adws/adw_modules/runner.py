@@ -50,6 +50,7 @@ class Run:
         self.tokens = 0
         self.cost = 0.0
         self.finalized = False       # the session row has its final status
+        self.stopped = False         # ended on request (a kill, Ctrl+C, the Console's Stop)
         self._seq = tracer.max_phase_seq(adw_id)   # a joined run continues the sequence
         self.repo_root = git_helper.repo_root()    # where every agent is spawned to work;
         self.main_root = self.repo_root            # the engineer's checkout, always
@@ -125,7 +126,7 @@ class Run:
                                           type="phase_end", name=params.name,
                                           payload={"status": "fail"}))
             self.tracer.phase_upsert(phase)
-            self.tracer.session_finish(self.adw_id, ok=False)
+            self.tracer.session_finish(self.adw_id, ok=False, stopped=self.stopped)
             self.finalized = True
             self.console.phase_ended(phase, time.monotonic() - clock)
             self.console.session_finished(False, self.tokens, self.cost,

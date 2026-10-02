@@ -6,8 +6,8 @@
  * session progress and lane layout are computed in the UI, never stored.
  */
 
-/** sessions.status — a run is running until it earns success. */
-export type SessionStatus = "running" | "success" | "fail";
+/** sessions.status — a run is running until it earns success; `stopped` was ended on request. */
+export type SessionStatus = "running" | "success" | "fail" | "stopped";
 
 /** phases.status — queued only for manifest-declared phases not yet entered. */
 export type PhaseStatus = "queued" | "running" | "success" | "fail";
@@ -396,4 +396,31 @@ export interface Launch extends LaunchPreview {
   exit_code: number | null;
   /** The last lines of the launch log: for a refused Launch, the ADW's own message. */
   log_tail: string;
+}
+
+/**
+ * What became of one live process a Stop found recorded for the Run: `killed`,
+ * `stopped` (the ADW settled itself and exited), `gone` (already exited), or
+ * `mismatch` — the pid now runs something else, so it was never signalled.
+ */
+export interface StoppedProcess {
+  kind: string;
+  name: string;
+  pid: number;
+  command: string;
+  outcome: "killed" | "stopped" | "gone" | "mismatch";
+  /** What the pid runs now, when it exists. */
+  live_command: string | null;
+  /** procs.py's own sentence for what happened to it. */
+  said: string;
+}
+
+/** POST /api/sessions/:adw_id/stop — the report of `procs.py stop`, as it printed it. */
+export interface StopReport {
+  adw_id: string;
+  status: SessionStatus;
+  /** `run`: the Run settled itself; `stop`: it couldn't, and the stop closed its trace. */
+  settled_by: "run" | "stop";
+  processes: StoppedProcess[];
+  notes: string[];
 }

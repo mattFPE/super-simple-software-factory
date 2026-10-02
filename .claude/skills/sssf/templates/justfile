@@ -95,6 +95,10 @@ tail ADW_ID:
 procs ADW_ID:
     @sqlite3 {{db}} "select kind, name, pid, command, started_at from processes where adw_id='{{ADW_ID}}' and ended_at is null order by id;"
 
+# stop a run, agents before the ADW, each pid checked first: just kill <adw_id>
+kill ADW_ID:
+    uv run adws/adw_modules/procs.py stop '{{ADW_ID}}' --db {{db}}
+
 # ── worktrees ───────────────────────────────────────────────────────────────
 # Committing workflows run in ../<repo>.sssf-worktrees/<adw_id> on branch
 # sssf/<adw_id>. A successful run removes its worktree; a failed one keeps it.

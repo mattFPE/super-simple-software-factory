@@ -159,10 +159,11 @@ class Tracer:
         self.conn.execute("UPDATE sessions SET request=? WHERE adw_id=?",
                           (request[:500], adw_id))
 
-    def session_finish(self, adw_id: str, ok: bool) -> None:
+    def session_finish(self, adw_id: str, ok: bool, stopped: bool = False) -> None:
+        """Settle the session: `success`, `fail`, or `stopped` — ended on request, not broken."""
         self.conn.execute(
             "UPDATE sessions SET status=?, ended_at=? WHERE adw_id=?",
-            ("success" if ok else "fail", now_iso(), adw_id),
+            ("success" if ok else "stopped" if stopped else "fail", now_iso(), adw_id),
         )
         self.processes_end_all(adw_id)   # nothing of this run is alive any more
 

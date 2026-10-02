@@ -16,7 +16,7 @@ from typing import Optional
 
 import yaml
 
-from . import agent_cc, agent_pi, permissions, prompts, quality as quality_blocks, skills
+from . import agent_cc, agent_pi, permissions, procs, prompts, quality as quality_blocks, skills
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
                          GateCheck, GateReport, Phase, PiRequest, PiResult, SSSFConfig,
                          UsageBreakdown)
@@ -175,9 +175,9 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
         result = _interface(agent).run(
             request,
             on_event=_event_forwarder(run, phase, agent),
-            on_spawn=lambda pid: run.tracer.process_start(
-                run.adw_id, "agent", agent.name, pid,
-                f"{agent.coding_agent} {agent.name} {agent.model}"),
+            # The argv it really runs, so a stop can check the pid still runs it.
+            on_spawn=lambda pid, argv: run.tracer.process_start(
+                run.adw_id, "agent", agent.name, pid, procs.recorded_command(argv)),
             on_exit=lambda pid: run.tracer.process_end(run.adw_id, pid))
         run.add_usage(result.tokens, result.cost)
         spent.merge(result.usage)

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
-import type { EventRow, SessionSummary } from '../lib/types'
-import { archiveSession, fetchEvents } from '../lib/api'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { Square } from 'lucide-vue-next'
+import type { EventRow, SessionSummary, StopReport } from '../lib/types'
+import { archiveSession, fetchEvents, stopRun } from '../lib/api'
 import { axisTicks, fmtDate, fmtOffset, ts } from '../lib/format'
 import { agentColor, dotColor, eventLabel } from '../lib/events'
 import { hrefFor } from '../lib/router'
@@ -23,6 +24,28 @@ async function archive(event: MouseEvent) {
     await archiveSession(props.session.adw_id)
   } catch {
     emit('archived', '')   // signals the parent to re-sync from the server
+  }
+}
+
+// Stop asks first: a stopped Run can't be resumed from where it was. The
+// factory's procs.py does the kill; the card only reports what it said.
+const stopStep = ref<'idle' | 'confirm' | 'stopping'>('idle')
+const stopNotes = ref<string[]>([])
+
+function reportNotes(report: StopReport): string[] {
+  const notes = report.processes.filter((p) => p.outcome === 'mismatch').map((p) => p.said)
+  if (report.settled_by === 'stop') notes.push("it couldn't settle itself, so its trace was closed for it")
+  return [...notes, ...report.notes]
+}
+
+async function confirmStop() {
+  stopStep.value = 'stopping'
+  try {
+    stopNotes.value = reportNotes(await stopRun(props.session.adw_id))
+  } catch (error) {
+    stopNotes.value = [`not stopped: ${(error as Error).message}`]
+  } finally {
+    stopStep.value = 'idle'
   }
 }
 
@@ -197,6 +220,28 @@ const hiddenRowCount = computed(() =>
     >
       ×
     </button>
+    <!-- Clicks in here never navigate the card it sits in. -->
+    <span v-if="running || stopStep !== 'idle'" class="card-stop" @click.prevent.stop>
+      <template v-if="stopStep === 'confirm'">
+        <span class="stop-ask">Stop this Run?</span>
+        <button class="stop-btn stop-yes" type="button" @click="confirmStop">Stop</button>
+        <button class="stop-btn" type="button" @click="stopStep = 'idle'">Cancel</button>
+      </template>
+      <span v-else-if="stopStep === 'stopping'" class="stop-ask">Stopping…</span>
+      <button
+        v-else
+        class="stop-btn"
+        type="button"
+        title="Stop — kill its agents, then the ADW"
+        @click="stopStep = 'confirm'"
+      >
+        <Square :size="14" :stroke-width="2.5" /> Stop
+      </button>
+    </span>
+    <span v-if="stopNotes.length" class="stop-notes" @click.prevent.stop="stopNotes = []">
+      <span v-for="(note, i) in stopNotes" :key="i">{{ note }}</span>
+      <span class="faint">click to dismiss</span>
+    </span>
     <span class="card-id">{{ session.adw_id }}</span>
     <span class="card-adw" :title="session.adw_name ?? ''">{{ session.adw_name ?? '—' }}</span>
     <span class="card-req" :title="session.request ?? ''">{{ session.request }}</span>
@@ -305,6 +350,65 @@ const hiddenRowCount = computed(() =>
 .card-archive:hover {
   background: rgba(255, 111, 103, 0.16);
   color: #ff6f67;
+}
+
+.card-stop {
+  /* Beside the archive button, always shown: a running Run's Stop is no triage click. */
+  position: absolute;
+  top: 10px;
+  right: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+}
+
+.stop-ask {
+  font-size: 15px;
+  color: var(--text);
+}
+
+.stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.stop-btn:hover,
+.stop-yes {
+  border-color: rgba(255, 111, 103, 0.6);
+  color: var(--red);
+}
+
+.stop-yes:hover {
+  background: rgba(255, 111, 103, 0.16);
+}
+
+.stop-notes {
+  /* Over the stats at the foot: what the stop said, until it is dismissed. */
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(232, 182, 74, 0.5);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 14px;
+  color: var(--text);
+  cursor: default;
 }
 
 .card:hover {

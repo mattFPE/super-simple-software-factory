@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,38 +38,6 @@ def operator_env() -> dict[str, str]:
              if p and os.path.normcase(p.rstrip("\\/")) not in venv_bins]
     env["PATH"] = os.pathsep.join(parts)
     return env
-
-
-def pid_alive(pid: int) -> bool:
-    """Whether a process with this pid exists right now. Never signals it.
-
-    Not `os.kill(pid, 0)`: on POSIX that is the standard probe, but on Windows
-    Python maps any signal other than CTRL_C/CTRL_BREAK to TerminateProcess —
-    the "probe" would kill the process it asked about.
-    """
-    if pid <= 0:
-        return False
-    if sys.platform != "win32":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True                      # exists, owned by someone else
-        return True
-    import ctypes
-    from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ctypes.get_last_error() == 5              # ERROR_ACCESS_DENIED: it exists
-    try:
-        code = wintypes.DWORD()
-        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        return code.value == 259                         # STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
 
 
 def new_id(length: int = 8) -> str:

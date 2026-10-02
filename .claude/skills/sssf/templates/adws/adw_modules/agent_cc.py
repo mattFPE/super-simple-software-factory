@@ -234,11 +234,11 @@ def _bill(result: PiResult, model_usage: dict, previous: dict) -> None:
 
 
 def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
-        on_spawn: Optional[Callable[[int], None]] = None,
+        on_spawn: Optional[Callable[[int, list[str]], None]] = None,
         on_exit: Optional[Callable[[int], None]] = None) -> PiResult:
     """Run one non-interactive Claude Code turn — create or continue the session.
 
-    `on_spawn(pid)` and `on_exit(pid)` bracket the child process so the caller
+    `on_spawn(pid, argv)` and `on_exit(pid)` bracket the child process so the caller
     can record it as killable, as with pi.
     """
     _, model = resolve_model(request.model)
@@ -299,7 +299,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                                        errors="replace", bufsize=1, cwd=request.cwd,
                                        env=_child_env(), **procs.popen_kwargs())
             if on_spawn:
-                on_spawn(process.pid)
+                on_spawn(process.pid, process.args)
             assert process.stdin is not None and process.stdout is not None
             try:
                 process.stdin.write(request.prompt)

@@ -5,6 +5,8 @@ export type {
   SessionSummary,
   SessionUsage,
   SessionDetail,
+  StopReport,
+  StoppedProcess,
   Phase,
   Event as EventRow,
   EventsPage,

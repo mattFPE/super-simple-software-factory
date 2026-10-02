@@ -264,11 +264,11 @@ class ToolCallTracker:
 
 
 def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
-        on_spawn: Optional[Callable[[int], None]] = None,
+        on_spawn: Optional[Callable[[int, list[str]], None]] = None,
         on_exit: Optional[Callable[[int], None]] = None) -> PiResult:
     """Run one non-interactive pi turn.
 
-    `on_spawn(pid)` and `on_exit(pid)` bracket the child process so the caller
+    `on_spawn(pid, argv)` and `on_exit(pid)` bracket the child process so the caller
     can record it as killable — a hung coding agent is otherwise a pid you have
     to hunt for in `ps` while the run sits there.
     """
@@ -308,7 +308,7 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                                bufsize=1, cwd=request.cwd,
                                env=operator_env(), **procs.popen_kwargs())
     if on_spawn:
-        on_spawn(process.pid)
+        on_spawn(process.pid, process.args)
     last_error = ""                          # set while the latest assistant turn is an error
     with raw_path.open("a", encoding="utf-8") as raw,             procs.supervise(process, request.idle_timeout_seconds,
                             f"pi {provider}/{model_id}") as watchdog:

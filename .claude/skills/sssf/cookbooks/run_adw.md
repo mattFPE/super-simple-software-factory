@@ -117,7 +117,7 @@ just kill <adw_id>       # stop it — children first, then the workflow
 
 `processes` rows with `ended_at IS NULL` are the live ones. If `procs` shows a pi child but the phase has produced no `tool_call` events and its `raw_output.jsonl` is empty, the agent never got started properly — check the model resolves and that nothing is blocking the subprocess, rather than waiting it out. `just kill` verifies each pid still matches the command that was recorded before signalling, because pids get recycled.
 
-A killed run marks itself `fail` and closes its process rows, so the trace never claims work is in flight that is already dead.
+A killed run marks itself `stopped`, not `fail`, releases its issue's claim with a "was stopped" comment, and closes its process rows, so the trace never claims work is in flight that is already dead. The Console's Stop, on a running Run's card, runs this same `just kill`.
 
 ## Report
 
