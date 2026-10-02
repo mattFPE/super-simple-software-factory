@@ -1,13 +1,22 @@
 # /// script
 # dependencies = ["pydantic", "python-dotenv", "pyyaml", "rich"]
 # ///
-"""A GitHub issue as a run's request: read it, decide it may run, claim it, report back.
+"""An issue as a run's request: read it, decide it may run, claim it, report back.
 
 Specs come from /to-spec and tickets from /to-tickets (mattpocock/skills); both
-land as GitHub issues, and an issue is a prompt like any other:
+land on the repo's Tracker, and an issue is a prompt like any other:
 
     just sdlc "#42"                     quoted: an unquoted # starts a comment
     just sdlc https://github.com/<owner>/<repo>/issues/42
+    just sdlc .scratch/<feature>/issues/03-<slug>.md      in a Local Markdown repo
+
+Which Tracker a repo uses is the heading of docs/agents/issue-tracker.md, the
+file /setup-matt-pocock-skills writes: `GitHub` or `Local Markdown`, and GitHub
+when there is none. In a Local Markdown repo a path to `.scratch/<feature>/spec.md`
+or `.scratch/<feature>/issues/NN-<slug>.md` is therefore an issue, not a request
+file. A local issue keeps the same rules as a GitHub one, read from its
+`Status:` and `Blocked by:` lines and its `## Comments` (see "local Markdown"
+below), and always from the engineer's checkout, never a worktree's copy.
 
 Whether it may run is already on the tracker, so no flag decides it:
 
@@ -26,12 +35,12 @@ removes the label and comments with the outcome. Done needs no label of its
 own: the PR says `Closes #42`, so merging it closes the issue. A failed run
 leaves the ready label where it was, so a rerun is just a rerun.
 
-Everything goes through `gh api` against origin's repository, never gh's
-default, which in a fork is the parent (see git_helper.origin_repo).
+Everything on GitHub goes through `gh api` against origin's repository, never
+gh's default, which in a fork is the parent (see git_helper.origin_repo).
 
 This file is also the command line the Console lists a repo's Ready issues
-with, each with the verdict a Launch would reach; the Console never asks
-GitHub itself:
+with, each with the verdict a Launch would reach; the Console never reads the
+Tracker itself:
 
     uv run adws/adw_modules/issues.py --list-ready [--json]
 """
@@ -62,6 +71,9 @@ from .utils import operator_env
 RUNNING_LABEL = "agent-running"
 READY_ROLE = "ready-for-agent"             # the role's canonical name in mattpocock/skills
 TRIAGE_LABELS = Path("docs") / "agents" / "triage-labels.md"   # /setup-matt-pocock-skills
+TRACKER_FILE = Path("docs") / "agents" / "issue-tracker.md"     # /setup-matt-pocock-skills
+GITHUB, LOCAL = "GitHub", "Local Markdown"   # the Trackers sssf reads, as that file's heading names them
+RESOLVED = "resolved"                      # the only local Status that clears a blocker
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}                   # whose comments reach an agent
 MARKER = "<!-- sssf -->"                   # on our own comments, so they are never fed back in
 CHECKLIST_HEADING = "Review checklist"     # what gates.checklist_covered reads back
@@ -73,6 +85,9 @@ LIST_PAGE = 100                            # GitHub's largest page: the one --li
 _NUMBER = re.compile(r"^#(\d+)$")
 _URL = re.compile(r"^https?://([^/\s]+)/([^/\s]+)/([^/\s]+)/issues/(\d+)/?(?:[?#]\S*)?$")
 _HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_LOCAL_PATH = re.compile(r"^\.scratch/[^/]+/(?:spec\.md|issues/\d+-[^/]*\.md)$")
+_TICKET_FILE = re.compile(r"^(\d+)-.*\.md$")
+_BREAK = re.compile(r"^ {0,3}([-*_])(?:\s*\1){2,}\s*$")   # a thematic break: ---, ***, ___
 _ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$")
 _CLOSING_PRS = ("query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name)"
                 "{issue(number:$n){closedByPullRequestsReferences(first:20,includeClosedPrs:false)"
@@ -81,8 +96,13 @@ _CLOSING_PRS = ("query($owner:String!,$name:String!,$n:Int!){repository(owner:$o
 
 # ── is it an issue ───────────────────────────────────────────────────────────
 
+def is_issue(arg: str) -> bool:
+    """Whether `arg`, an ADW's prompt, names an issue rather than a request."""
+    return parse_ref(arg) is not None or local_ref(arg) is not None
+
+
 def parse_ref(arg: str) -> tuple[str | None, int] | None:
-    """(repo, number) when `arg` names an issue, else None. `#42` names no repo."""
+    """(repo, number) when `arg` names a GitHub issue, else None. `#42` names no repo."""
     text = arg.strip()
     if match := _NUMBER.match(text):
         return None, int(match.group(1))
@@ -93,13 +113,53 @@ def parse_ref(arg: str) -> tuple[str | None, int] | None:
     return None
 
 
+def local_ref(arg: str) -> str | None:
+    """The repo-relative path of the local issue `arg` names, in a Local Markdown
+    repo; else None. In a GitHub repo the same path is a request file; in one
+    whose Tracker sssf cannot read it refuses, never passing the Ticket's text
+    on without its Status having been checked."""
+    text = arg.strip().replace("\\", "/")
+    text = text[2:] if text.startswith("./") else text
+    if not _LOCAL_PATH.match(text):
+        return None
+    try:
+        return text if tracker() == LOCAL else None
+    except Unavailable as why:
+        raise SystemExit(f"{text} looks like a local issue, but {why}")
+
+
+def tracker() -> str:
+    """This repo's Tracker, from the heading of docs/agents/issue-tracker.md; GitHub
+    without one. Raises Unavailable for a heading naming one sssf does not read."""
+    path = git_helper.repo_root() / TRACKER_FILE
+    if not path.is_file():
+        return GITHUB
+    heading = next((match.group(2) for line in path.read_text(encoding="utf-8").splitlines()
+                    if (match := _HEADING.match(line)) and len(match.group(1)) == 1), "")
+    name = re.sub(r"(?i)^issue\s+tracker\s*:\s*", "", heading).strip()
+    for known in (GITHUB, LOCAL):
+        if _title_key(name) == _title_key(known):
+            return known
+    raise Unavailable(
+        f"`{TRACKER_FILE.as_posix()}` names a Tracker sssf does not read "
+        f"(`{name or 'no heading'}`)",
+        f"sssf reads `{GITHUB}` or `{LOCAL}` issues: make its heading one of those, "
+        "or keep to typed prompts.")
+
+
 # ── read it ──────────────────────────────────────────────────────────────────
 
 @cache
 def load(arg: str) -> Issue:
     """The issue `arg` names, read once per process — prompt and options share it."""
+    if path := local_ref(arg):
+        return _read_local(path)
     named_repo, number = parse_ref(arg)
     try:
+        if tracker() == LOCAL:
+            raise SystemExit(f"{arg} names a GitHub issue, but this repo's Tracker is {LOCAL} "
+                             f"({TRACKER_FILE.as_posix()}): pass the path to a Ticket under "
+                             ".scratch/ instead.")
         repo = github_repo()
     except Unavailable as why:
         raise SystemExit(f"an issue as the prompt needs GitHub, but {why}")
@@ -113,7 +173,7 @@ def load(arg: str) -> Issue:
 
 
 class Unavailable(Exception):
-    """Why this checkout cannot reach its GitHub issues, and what to do about it."""
+    """Why this checkout cannot reach its issues, and what to do about it."""
 
     def __init__(self, reason: str, fix: str):
         super().__init__(f"{reason}. {fix}")
@@ -248,10 +308,186 @@ def _checklist(body: str) -> tuple[list[str], str]:
     return [], ""
 
 
+# ── local Markdown ───────────────────────────────────────────────────────────
+#
+# A Local Markdown repo's issues are files in the engineer's checkout (ADR 0002):
+# a feature's Spec at .scratch/<feature>/spec.md, its Tickets beside it at
+# issues/NN-<slug>.md. Each maps onto the same Issue a GitHub one does, so
+# `problems` rules on both alike:
+#
+#   Status: <s>        labels [s] — readiness is the Status equalling the ready
+#                      label; `agent-running` (a Claim) also keeps the ready one,
+#                      which the Claim replaced and will restore
+#   Status: resolved   state "resolved", the only Status that clears a blocker
+#   Blocked by: ...    numbers name NN-*.md in the same folder, titles name their
+#                      `# NN — <title>` heading, ignoring case; one that names
+#                      nothing blocks as "missing". None, or no line: unblocked
+#   issues/NN-*.md     a Spec's Tickets; a Ticket's parent is its feature's spec.md
+#   ## Comments        every comment under it, split at sub-headings and `---`
+#                      rules, except sssf's own (MARKER); none of it is the body
+
+def _read_local(path: str) -> Issue:
+    root = git_helper.repo_root()
+    if not (root / path).is_file():
+        raise SystemExit(f"{path} is not a file in this checkout, so it names no issue.")
+    return _local_issue(root, path, ready_label())
+
+
+def _local_issue(root: Path, path: str, label: str) -> Issue:
+    file = root / path
+    doc = _local_doc(file)
+    spec = file.name == "spec.md"
+    parent = None if spec else file.parent.parent / "spec.md"
+    parent = parent if parent and parent.is_file() else None
+    checklist, source = _checklist(doc["body"])
+    if not checklist:                     # /to-tickets' local template: bare checkboxes
+        items = [line for line in doc["body"].splitlines() if re.match(r"^[-*+]\s+\[[ xX]\]", line)]
+        checklist, source = (_items("\n".join(items)), "Acceptance criteria") if items else ([], "")
+    return Issue(
+        number=_ticket_number(file), path=path, url=path, title=doc["title"],
+        state=_local_state(doc["status"]), body=doc["body"],
+        labels=_local_labels(doc["status"], label), ready_label=label,
+        parent=_local_link(root, parent, label) if parent else None,
+        parent_body=_local_doc(parent)["body"] if parent else "",
+        comments=doc["comments"], checklist=checklist, checklist_source=source,
+        tickets=([_local_link(root, t, label) for t in _ticket_files(file.parent / "issues")]
+                 if spec else []),
+        blockers=_local_blockers(root, file.parent, doc["blocked_by"], label))
+
+
+def _local_ready(label: str) -> list[Issue]:
+    """Every local Ready issue, and every claimed one (a Claim was Ready), by path."""
+    root = git_helper.repo_root()
+    scratch = root / ".scratch"
+    if not scratch.is_dir():
+        return []
+    files = [spec for spec in sorted(scratch.glob("*/spec.md"))]
+    files += [t for folder in sorted(scratch.glob("*/issues")) for t in _ticket_files(folder)]
+    found = []
+    for file in sorted(files, key=lambda f: f.relative_to(root).as_posix()):
+        if label in _local_labels(_local_doc(file)["status"], label):
+            found.append(_local_issue(root, file.relative_to(root).as_posix(), label))
+    return found
+
+
+def _local_doc(file: Path) -> dict:
+    """What a local issue file says: its title, Status, blockers, body and comments."""
+    text = _text(file.read_text(encoding="utf-8"))
+    body, comments = _split_comments(text)
+    heading = next((m.group(2) for line in body.splitlines()
+                    if (m := _HEADING.match(line)) and len(m.group(1)) == 1), "")
+    title = re.sub(r"^\d+\s*[—–-]+\s*", "", heading) or file.stem
+    blocked = _field(body, "Blocked by")
+    refs = [] if blocked is None or _is_none(blocked) else re.split(r"[,;&]|\band\b", blocked)
+    refs += [item for item in _items(_section(body, "Blocked by")) if not _is_none(item)]
+    refs = [ref.strip().strip("*`._ ").strip() for ref in refs]
+    return dict(title=title, status=_field(body, "Status") or "", body=body.strip(),
+                comments=comments, blocked_by=[ref for ref in refs if ref])
+
+
+def _split_comments(text: str) -> tuple[str, list[str]]:
+    """The file without its `## Comments` section, and that section's comments."""
+    lines = text.splitlines()
+    level, fenced, start, end = None, False, None, len(lines)
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        match = None if fenced else _HEADING.match(line)
+        if not match:
+            continue
+        if level is None and _title_key(match.group(2)) == "comments":
+            level, start = len(match.group(1)), i
+        elif level is not None and len(match.group(1)) <= level:
+            end = i
+            break
+    if start is None:
+        return text, []
+    comments, current, fenced = [], [], False
+    for line in lines[start + 1:end]:
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        if not fenced and (_BREAK.match(line) or _HEADING.match(line)):
+            comments.append("\n".join(current))
+            current = [] if _BREAK.match(line) else [line]
+        else:
+            current.append(line)
+    comments.append("\n".join(current))
+    kept = [c.strip() for c in comments if c.strip() and MARKER not in c]
+    return "\n".join(lines[:start] + lines[end:]), kept
+
+
+def _field(body: str, name: str) -> str | None:
+    """The value of the first `Name: value` line, bold or not; None without one."""
+    pattern = re.compile(rf"^\s*\**\s*{re.escape(name)}\s*\**\s*:\s*\**\s*(.*?)\s*$", re.I)
+    fenced = False
+    for line in body.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        if not fenced and (match := pattern.match(line)):
+            return match.group(1).strip("*` ")
+    return None
+
+
+def _is_none(text: str) -> bool:
+    return text.strip("*` ").casefold().startswith("none")
+
+
+def _ticket_files(folder: Path) -> list[Path]:
+    """A folder's NN-*.md Tickets, in number order."""
+    if not folder.is_dir():
+        return []
+    return sorted((f for f in folder.iterdir() if f.is_file() and _TICKET_FILE.match(f.name)),
+                  key=lambda f: (_ticket_number(f), f.name))
+
+
+def _ticket_number(file: Path) -> int | None:
+    match = _TICKET_FILE.match(file.name)
+    return int(match.group(1)) if match and file.parent.name == "issues" else None
+
+
+def _local_state(status: str) -> str:
+    return RESOLVED if status == RESOLVED else "open"
+
+
+def _local_labels(status: str, label: str) -> list[str]:
+    if status == RUNNING_LABEL:
+        return [label, RUNNING_LABEL]     # a Claim stands in for the ready Status it replaced
+    return [status] if status else []
+
+
+def _local_link(root: Path, file: Path, label: str) -> IssueLink:
+    doc = _local_doc(file)
+    path = file.relative_to(root).as_posix()
+    return IssueLink(number=_ticket_number(file), title=doc["title"], url=path, path=path,
+                     state=_local_state(doc["status"]),
+                     labels=_local_labels(doc["status"], label))
+
+
+def _local_blockers(root: Path, folder: Path, refs: list[str], label: str) -> list[IssueLink]:
+    """Each `Blocked by:` reference as the Ticket it names in `folder`, or as missing."""
+    tickets = [_local_link(root, file, label) for file in _ticket_files(folder)]
+    found: dict[str, IssueLink] = {}
+    for ref in refs:
+        number = re.match(r"^#?(\d+)\b", ref)
+        match = next((t for t in tickets
+                      if (t.number == int(number.group(1)) if number
+                          else _title_key(t.title) == _title_key(ref))), None)
+        link = match or IssueLink(number=int(number.group(1)) if number else None,
+                                  title=ref, state="missing")
+        found.setdefault(link.path or ref, link)
+    return list(found.values())
+
+
 # ── may it run ───────────────────────────────────────────────────────────────
 
 def require_ready(issue: Issue) -> None:
     """The trust gate, for every ADW: only a triaged issue becomes a prompt."""
+    if issue.path and issue.ready_label not in issue.labels:
+        status = f"`Status: {issue.labels[0]}`" if issue.labels else "no `Status:` line"
+        raise SystemExit(
+            f"{issue.path} has {status}, not `Status: {issue.ready_label}`, so it does not "
+            "run. The Status is how a triager says they read it and it is ready for an "
+            "agent. Set it if it is.")
     if issue.ready_label not in issue.labels:
         raise SystemExit(
             f"#{issue.number} is not labelled `{issue.ready_label}`, so it does not run. "
@@ -270,33 +506,40 @@ def problems(issue: Issue, force: bool = False) -> list[dict]:
     """Why `issue` is not Runnable, in the order require_runnable prints them: each
     a `verdict`, the `why` it says, and the issues or PRs involved. Empty when it is
     Runnable. --list-ready reports the first, so it and a Launch never disagree."""
-    found = []
+    found, ref = [], issue.ref
     if issue.state != "open":
-        found.append(dict(verdict="closed", why=f"#{issue.number} is {issue.state}."))
+        found.append(dict(verdict=issue.state, why=f"{ref} is {issue.state}."))   # closed, or resolved
     if issue.tickets:
         states = [(t, _ticket_state(t, issue)) for t in issue.tickets]
-        listing = "\n".join(f"  #{t.number} {t.title} — {state}" for t, state in states)
+        listing = "\n".join(f"  {t.ref} {t.title} — {state}" for t, state in states)
         found.append(dict(
             verdict="spec", tickets=issue.tickets,
             run_instead=[t for t, state in states if state == "ready"],
-            why=f"#{issue.number} is a spec split into {len(issue.tickets)} "
+            why=f"{ref} is a spec split into {len(issue.tickets)} "
                 f"ticket(s). Run a ticket instead:\n{listing}"))
-    waiting = [b for b in issue.blockers if b.state == "open"]
+    # Closed on GitHub, Resolved locally. A local reference that names no Ticket
+    # ("missing") blocks too, so a typo never lets a Ticket run early.
+    waiting = [b for b in issue.blockers if b.state not in ("closed", RESOLVED)]
     if waiting:
-        listing = "\n".join(f"  #{b.number} {b.title}" for b in waiting)
+        listing = "\n".join(f"  {b.title} — matches no Ticket in its folder"
+                            if b.state == "missing" else f"  {b.ref} {b.title}"
+                            for b in waiting)
         found.append(dict(
             verdict="blocked", blocked_by=waiting,
-            why=f"#{issue.number} is blocked by {len(waiting)} open issue(s); it can "
-                f"start once they are closed:\n{listing}"))
+            why=(f"{ref} is blocked by {len(waiting)} Ticket(s) not yet {RESOLVED}; it "
+                 f"can start once they are:\n{listing}" if issue.path else
+                 f"{ref} is blocked by {len(waiting)} open issue(s); it can "
+                 f"start once they are closed:\n{listing}")))
     if not force and RUNNING_LABEL in issue.labels:
+        held = f"has `Status: {RUNNING_LABEL}`" if issue.path else f"is labelled `{RUNNING_LABEL}`"
         found.append(dict(
             verdict="claimed",
-            why=f"#{issue.number} is labelled `{RUNNING_LABEL}`: another run has it. "
-                "If that run is dead (a hard kill leaves the label), pass --force."))
+            why=f"{ref} {held}: another run has it. "
+                "If that run is dead (a hard kill leaves it so), pass --force."))
     if not force and issue.open_prs:
         found.append(dict(
             verdict="open_pr", prs=issue.open_prs,
-            why=f"an open PR already closes #{issue.number}: "
+            why=f"an open PR already closes {ref}: "
                 f"{', '.join(issue.open_prs)}. Pass --force to run it again anyway."))
     return found
 
@@ -316,16 +559,23 @@ def list_ready() -> dict:
     and `unavailable` says why in one line, and what to do about it.
     """
     label = ready_label()
-    report = dict(tracker="GitHub",              # the only Tracker sssf reads, for now
-                  repo=None, ready_label=label, available=False,
+    report = dict(tracker=None, repo=None, ready_label=label, available=False,
                   unavailable=None, issues=[], truncated=False)
     try:
+        report["tracker"] = tracker()
+        if report["tracker"] == LOCAL:
+            local = _local_ready(label)
+            report["issues"] = [_listed(issue) for issue in local[:LIST_LIMIT]]
+            report["truncated"] = len(local) > LIST_LIMIT
+            _only_runnable_tickets(report["issues"])
+            report["available"] = True
+            return report
         repo = report["repo"] = github_repo()
         page = _api(f"repos/{_slug(repo)}/issues", repo, "-f", "state=open",
                     "-f", f"labels={label}", "-F", f"per_page={LIST_PAGE}")
         found = [raw for raw in page if "pull_request" not in raw]   # PRs share the endpoint
         with ThreadPoolExecutor(max_workers=8) as pool:
-            report["issues"] = list(pool.map(lambda raw: _listed(repo, raw, label),
+            report["issues"] = list(pool.map(lambda raw: _listed(_from_page(repo, raw, label)),
                                              found[:LIST_LIMIT]))
     except Unavailable as why:
         report["unavailable"] = dict(reason=why.reason, fix=why.fix)
@@ -348,24 +598,28 @@ def _only_runnable_tickets(listed: list[dict]) -> None:
     `problems` can only see a Ticket's labels; whether it is blocked or has an
     open PR is in its own row. A Ticket past the listing's end keeps its place.
     """
-    verdicts = {item["number"]: item["verdict"] for item in listed}
+    verdicts = {item["path"] or item["number"]: item["verdict"] for item in listed}
     for item in listed:
         item["run_instead"] = [t for t in item["run_instead"]
-                               if verdicts.get(t["number"], "runnable") == "runnable"]
+                               if verdicts.get(t["path"] or t["number"], "runnable") == "runnable"]
 
 
-def _listed(repo: str, raw: dict, label: str) -> dict:
-    """One Ready issue as --list-ready reports it: the first of its problems, if any."""
+def _from_page(repo: str, raw: dict, label: str) -> Issue:
+    """A GitHub issue from the listing's page, with all `problems` rules on."""
     body = _text(raw.get("body"))
-    issue = Issue(repo=repo, number=raw["number"], title=raw["title"], url=raw["html_url"],
-                  state=raw["state"], body=body, labels=_labels(raw), ready_label=label,
-                  **_verdict_fields(repo, raw, body))
+    return Issue(repo=repo, number=raw["number"], title=raw["title"], url=raw["html_url"],
+                 state=raw["state"], body=body, labels=_labels(raw), ready_label=label,
+                 **_verdict_fields(repo, raw, body))
+
+
+def _listed(issue: Issue) -> dict:
+    """One Ready issue as --list-ready reports it: the first of its problems, if any."""
     first = next(iter(problems(issue)), {})
 
     def links(key: str) -> list[dict]:
         return [link.model_dump() for link in first.get(key, [])]
 
-    return dict(number=issue.number, title=issue.title, url=issue.url,
+    return dict(number=issue.number, title=issue.title, url=issue.url, path=issue.path,
                 verdict=first.get("verdict", "runnable"), why=first.get("why"),
                 blocked_by=links("blocked_by"), tickets=links("tickets"),
                 run_instead=links("run_instead"), prs=first.get("prs", []))
@@ -375,15 +629,17 @@ def _listed(repo: str, raw: dict, label: str) -> dict:
 
 def as_prompt(issue: Issue) -> str:
     """The issue as a request every agent in the chain reads the same way."""
-    parts = [f"# GitHub issue #{issue.number}: {issue.title}\n\n{issue.url}\n\n"
+    ref = issue.ref
+    where = "Local issue" if issue.path else "GitHub issue"
+    parts = [f"# {where} {ref}: {issue.title}\n\n{issue.url}\n\n"
              f"This issue is the request. Build what it asks for, nothing more.\n\n{issue.body}"]
     if issue.parent:
-        parts.append(f"# Background: parent spec #{issue.parent.number}: {issue.parent.title}\n\n"
-                     f"Context only. The request is #{issue.number} above, not the whole spec: "
+        parts.append(f"# Background: parent spec {issue.parent.ref}: {issue.parent.title}\n\n"
+                     f"Context only. The request is {ref} above, not the whole spec: "
                      "use the spec's vocabulary and its decisions, and put tests where its "
                      f"Testing Decisions say.\n\n{issue.parent_body}")
     if issue.comments:
-        parts.append(f"# Maintainer comments on #{issue.number}\n\nLater than the body. Where "
+        parts.append(f"# Maintainer comments on {ref}\n\nLater than the body. Where "
                      "they disagree, the comment is the correction.\n\n"
                      + "\n\n".join(issue.comments))
     if issue.checklist:
@@ -403,9 +659,10 @@ def checklist_in(prompt: str) -> list[str]:
 def claim(run, opts: RunOptions) -> None:
     """The `claim` phase: mark the issue as worked on; settle it when the run settles.
 
-    Call right after the request phase. A request that is not an issue does nothing.
+    Call right after the request phase. A request that is not an issue does nothing,
+    and nor, yet, does a local issue: its Run reads it but leaves its Status alone.
     """
-    if not opts.issue:
+    if not opts.issue or opts.issue.path:
         return
     issue = opts.issue
     with run.phase(PhaseParams(
@@ -621,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{listing['unavailable']['reason']}. {listing['unavailable']['fix']}")
     else:
         for item in listing["issues"]:
-            print(f"#{item['number']} {item['title']} — {item['verdict']}")
+            print(f"{item['path'] or '#' + str(item['number'])} {item['title']} — {item['verdict']}")
         if listing["truncated"]:
             print(f"(only the first {LIST_LIMIT} are listed)")
     return 0

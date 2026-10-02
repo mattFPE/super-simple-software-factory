@@ -392,21 +392,29 @@ class PRConfig(BaseModel):
 
 class IssueLink(BaseModel):
     """Another issue, as far as a run needs to name it."""
-    number: int
+    number: Optional[int] = None    # a local Spec has none
     title: str = ""
     url: str = ""
-    state: str = "open"
+    state: str = "open"             # a local one: open, resolved, or missing (matches no file)
     labels: list[str] = Field(default_factory=list)
+    path: str = ""                  # a local issue's repo-relative path; empty on GitHub
+
+    @property
+    def ref(self) -> str:
+        """How a person names it: `#42`, its path, or, matching no file, its reference."""
+        return self.path or (f"#{self.number}" if self.state != "missing" else self.title)
 
 
 class Issue(BaseModel):
-    """A GitHub issue that is a run's request: a ticket, or a spec with no tickets.
+    """An issue that is a run's request: a ticket, or a spec with no tickets —
+    on GitHub, or a local Markdown file under `.scratch/`.
 
     Read once, before anything spawns (see issues.py). Everything a later phase
-    needs is on it, so nothing asks GitHub the same question twice.
+    needs is on it, so nothing asks the Tracker the same question twice.
     """
-    repo: str                       # [HOST/]OWNER/REPO — always origin's, where the PR goes
-    number: int
+    repo: str = ""                  # [HOST/]OWNER/REPO — always origin's, where the PR goes
+    number: Optional[int] = None    # a local Spec has none
+    path: str = ""                  # a local issue's repo-relative path; empty on GitHub
     title: str
     url: str
     state: str = "open"
@@ -422,6 +430,11 @@ class Issue(BaseModel):
     blockers: list[IssueLink] = Field(default_factory=list)  # every "blocked by", open or closed
     open_prs: list[str] = Field(default_factory=list)        # PRs that already close it
 
+    @property
+    def ref(self) -> str:
+        """How a person names it, and passes it back to an ADW: `#42`, or its path."""
+        return self.path or f"#{self.number}"
+
 
 class RunOptions(BaseModel):
     """How an ADW was asked to run — the CLI flags, as one object (rule 4)."""
@@ -432,7 +445,7 @@ class RunOptions(BaseModel):
     in_place: bool = False
     allow_dirty: bool = False                               # in place only
     land: Literal["branch", "merge", "pr"] = "branch"       # what happens after the commit
-    issue: Optional[Issue] = None   # the request was `#42` or an issue URL (issues.py)
+    issue: Optional[Issue] = None   # the request was an issue: `#42`, its URL, or a local path
 
 
 class Skill(BaseModel):

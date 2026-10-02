@@ -55,10 +55,11 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 def resolve_prompt(arg: str) -> str:
-    """CLI prompt arg: an issue (`#42`, or its URL) resolves to the issue as a
-    request, a file path to its contents, anything else is inline text."""
+    """CLI prompt arg: an issue (`#42`, its URL, or in a Local Markdown repo a
+    path under .scratch/) resolves to the issue as a request, a file path to its
+    contents, anything else is inline text."""
     from . import issues                  # here: issues imports this module
-    if issues.parse_ref(arg):
+    if issues.is_issue(arg):
         issue = issues.load(arg)
         issues.require_ready(issue)       # untrusted text never reaches an agent
         return issues.as_prompt(issue)

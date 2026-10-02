@@ -68,8 +68,8 @@ def main(prompt: str, base: str = "main",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("prompt", help="inline text, a path to a prompt file, or a GitHub "
-                        "issue (\"#42\" or its URL)")
+    parser.add_argument("prompt", help="inline text, a path to a prompt file, or an issue "
+                        "(\"#42\", its URL, or a local issue's .scratch/ path)")
     parser.add_argument("--base", default="main", help="ref the change is measured against")
     session.add_cli_args(parser, resumes=True)
     args = parser.parse_args()

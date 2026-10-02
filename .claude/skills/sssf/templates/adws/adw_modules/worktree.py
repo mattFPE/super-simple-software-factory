@@ -141,7 +141,7 @@ def _setup(run, path: Path) -> None:
 def _pr_body(run, opts: RunOptions, ahead: int) -> str:
     """What the PR says: the issue it closes, what the run checked, who opened it."""
     parts = []
-    if opts.issue:
+    if opts.issue and not opts.issue.path:
         # Same repo by construction (issues.load refuses any other), so the bare
         # form links, and GitHub closes the issue when the PR merges.
         refs = f"Closes #{opts.issue.number}"

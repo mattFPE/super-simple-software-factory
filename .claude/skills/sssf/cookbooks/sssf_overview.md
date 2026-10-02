@@ -28,7 +28,7 @@ adws/
 │   ├── changes.py               git diff vs a resolved base → ChangeSet → envelope for the documenter
 │   ├── worktree.py              a committing run's own worktree + branch sssf/<adw_id>; lands as branch/merge/PR
 │   ├── ci.py                    with pr.wait_for_checks: wait for the PR's CI, and take its verdict
-│   ├── issues.py                a GitHub issue as the request: trust + readiness checks, claim, outcome comment
+│   ├── issues.py                an issue as the request (GitHub, or Local Markdown under .scratch/): trust + readiness checks, claim, outcome comment
 │   ├── skills.py                the Agent Skills a roster names: checked, offered in the system prompt, protected
 │   ├── sssf_update.py           `just sssf-update`: finds the newer sssf, runs its install.py --update (stdlib only)
 │   ├── quality.py, procs.py     known commands from config · agent idle watchdog + process-tree kill

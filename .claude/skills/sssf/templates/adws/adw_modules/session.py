@@ -177,7 +177,7 @@ def add_cli_args(parser, commits: bool = False, resumes: bool = False) -> None:
 def cli_options(args) -> RunOptions:
     commits = hasattr(args, "merge")
     # The prompt was already resolved (utils.resolve_prompt), so this is a cache hit.
-    issue = issues.load(args.prompt) if issues.parse_ref(args.prompt) else None
+    issue = issues.load(args.prompt) if issues.is_issue(args.prompt) else None
     if issue and commits:
         issues.require_runnable(issue, force=args.force)
     in_place = getattr(args, "in_place", False)
@@ -188,9 +188,10 @@ def cli_options(args) -> RunOptions:
         land=("merge" if getattr(args, "merge", False)
               else "pr" if getattr(args, "pr", False)
               else "branch" if getattr(args, "branch", False)
-              # An issue ends where it can be closed: a PR. In place there is
-              # no branch of the run's own to open one from.
-              else "pr" if issue and commits and not in_place else "branch"))
+              # A GitHub issue ends where it can be closed: a PR. In place there
+              # is no branch of the run's own to open one from.
+              else "pr" if issue and not issue.path and commits and not in_place
+              else "branch"))
     if opts.allow_dirty and not opts.in_place:
         raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "
                          "from your last commit and never sees your uncommitted changes")
@@ -198,5 +199,6 @@ def cli_options(args) -> RunOptions:
         raise SystemExit("--merge / --pr end a worktree run; with --in-place the commit is "
                          "already on your branch")
     if getattr(args, "force", False) and not issue:
-        raise SystemExit("--force only applies when the prompt is an issue (#42 or its URL)")
+        raise SystemExit("--force only applies when the prompt is an issue (#42, its URL, "
+                         "or a local issue's path)")
     return opts

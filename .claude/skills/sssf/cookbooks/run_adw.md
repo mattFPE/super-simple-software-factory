@@ -27,6 +27,8 @@ The prompt is inline text, a file path, or a GitHub issue (`"#42"` or its URL). 
 
 **An issue runs as a ticket** (`adw_modules/issues.py`). It must carry the repo's ready-for-agent label (mapped in `docs/agents/triage-labels.md` when `/setup-matt-pocock-skills` wrote one), and a committing chain also refuses it when it is closed, has an open blocker, is a spec already split into tickets, or is labelled `agent-running` / has an open PR that closes it (`--force` overrides only those last two). The run labels it `agent-running` in a `claim` phase, defaults to `--pr` with `Closes #42` in the body, and when it ends removes the label and comments with the outcome, including on failure and Ctrl+C. After the run, report the PR link. On a failure, the issue comment already carries the rerun command.
 
+**In a Local Markdown repo** (`docs/agents/issue-tracker.md` is headed `Local Markdown`), the issue is a path instead: `.scratch/<feature>/issues/NN-<slug>.md` for a Ticket, `.scratch/<feature>/spec.md` for a Spec, and `#42` is refused. The same rules apply, read from the file: `Status:` must be the ready label, `Blocked by:` numbers or titles name Tickets in the same folder and only `Status: resolved` clears one (a reference that names nothing still blocks), a Ticket runs with its `spec.md` attached, and a Spec with an `issues/` folder refuses, naming its Runnable Tickets. Comments under `## Comments` reach the agent, except sssf's own. Claiming a local Ticket is not written yet: the run reads it and leaves its `Status:` alone.
+
 ### Listen for the roster
 
 The chain says *what runs*; the config says *who runs it*. **If the engineer references a roster, a config, or a model tier, pass it — do not fall through to the default.**
