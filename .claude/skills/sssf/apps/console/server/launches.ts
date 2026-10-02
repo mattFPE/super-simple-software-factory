@@ -7,21 +7,27 @@
  * a flag the ADW doesn't take. A Launch spawns exactly what the confirm step
  * showed: an argv list, never a shell, from the repo root, detached so the Run
  * outlives this server. Its output goes to `console.log` in the Run's session
- * dir, the one thing the Console writes for a Launch; the trace is the ADW's
- * own tracer's to write (ADR 0001).
+ * dir, and beside it `launch.json` records the Launch itself; those two files
+ * are all the Console writes for a Launch. The trace is the ADW's own tracer's
+ * to write (ADR 0001).
  *
  * A Resuming ADW is launched only to continue a settled Run, under that Run's
  * adw_id, and its Launch is Starting until its own process joins that Run's
  * trace. An issue's Rerun joins its failed Run the same way, with the ADW that
  * Run ran, so it picks the kept worktree back up.
  *
- * Launches live in memory only. After a restart a Run is still found through
- * its session row; one that never wrote a row is simply forgotten.
+ * After a restart a Run is still found through its session row, and a Launch
+ * that never became its Run through its record: today's, unless dismissed.
+ * This server no longer holds that process, so whether it still runs is asked
+ * of procs.py, the check `just kill` makes against a recycled pid; with no
+ * exit to see, its exit code is unknown. A check that can't answer leaves the
+ * Launch as it was, to be asked again.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
@@ -67,6 +73,9 @@ const ADW_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const DESCRIBE_TIMEOUT_MS = 120_000;   // a first `uv run` may resolve the script's deps
 const TAIL_LINES = 20;
 const TAIL_BYTES = 16 * 1024;
+const RECORD = "launch.json";
+/** How often a recovered Launch's process is asked after: each ask is a `uv run`. */
+const RECHECK_MS = 3_000;
 
 const indentOf = (line: string): number => line.length - line.trimStart().length;
 
@@ -228,7 +237,7 @@ function tailOf(path: string, from: number): string {
   }
 }
 
-/** A Launch this server spawned, and whether its process has exited. */
+/** A Launch this server spawned, or recovered from its record, and whether its process has exited. */
 interface Tracked {
   launch: Omit<Launch, "state" | "log_tail" | "holds_issue">;
   exited: boolean;
@@ -238,6 +247,68 @@ interface Tracked {
   processesBefore: number | null;
   /** The Run's Claims logged when it began: its own Claim is the next one. */
   claimsBefore: number;
+  /** The process spawned; null when it never started. */
+  pid: number | null;
+  /** Read back from its record: no exit event will come, so procs.py is asked instead. */
+  recovered: boolean;
+  checkedAt: number;
+  checking: boolean;
+}
+
+/** `launch.json`: what a restarted server needs to show a Launch again. */
+interface LaunchRecord {
+  adw_id: string;
+  adw: string;
+  argv: string[];
+  /** The command the confirm step showed, for whoever reads the file: argv is what runs and is checked. */
+  command: string;
+  started_at: string;
+  pid: number | null;
+  continuing: boolean;
+  rerun: boolean;
+  issue: string | null;
+  exited: boolean;
+  exit_code: number | null;
+  log_from: number;
+  processes_before: number | null;
+  claims_before: number;
+  dismissed: boolean;
+}
+
+const int = <T>(value: unknown, fallback: T): number | T => (Number.isInteger(value) ? value as number : fallback);
+
+/** A record as written, or null when it is missing or isn't one; optional fields fall back. */
+function readRecord(path: string, adwId: string): LaunchRecord | null {
+  let raw: Partial<LaunchRecord>;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+  const { argv, pid } = raw;
+  if (raw.adw_id !== adwId || typeof raw.adw !== "string" || typeof raw.started_at !== "string"
+    || !Array.isArray(argv) || !argv.every((a) => typeof a === "string")
+    || !(pid === null || Number.isInteger(pid))) return null;
+  return {
+    adw_id: adwId, adw: raw.adw, argv, started_at: raw.started_at, pid: pid ?? null,
+    command: typeof raw.command === "string" ? raw.command : "",
+    continuing: raw.continuing === true,
+    rerun: raw.rerun === true,
+    issue: typeof raw.issue === "string" ? raw.issue : null,
+    exited: raw.exited === true,
+    exit_code: int(raw.exit_code, null),
+    log_from: int(raw.log_from, 0),
+    processes_before: int(raw.processes_before, null),
+    claims_before: int(raw.claims_before, 0),
+    dismissed: raw.dismissed === true,
+  };
+}
+
+/** Today, in the server's time zone: the Runs pane's window. */
+function startOfToday(): number {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  return midnight.getTime();
 }
 
 export class Launches {
@@ -259,7 +330,69 @@ export class Launches {
     private readonly trace: Trace,
     /** The Tracker issues.py names, when no listing has named it yet. */
     private readonly readTracker: () => Promise<string | null>,
+    /** Whether a pid still runs the argv it was spawned with, as procs.py decides it. */
+    private readonly stillRunning: (pid: number, argv: string[], adwId: string) => Promise<boolean>,
   ) {}
+
+  /**
+   * Show again today's Launches that never became their Run and weren't
+   * dismissed, oldest first, each one's process asked after once before the
+   * first request is served. Nothing but their records is read.
+   */
+  async recover(): Promise<void> {
+    if (!existsSync(this.sessionsDir)) return;
+    const since = startOfToday();
+    const records = readdirSync(this.sessionsDir)
+      .filter((id) => ADW_ID.test(id))
+      .map((id) => readRecord(join(this.sessionsDir, id, RECORD), id))
+      .filter((r): r is LaunchRecord => r !== null && !r.dismissed && Date.parse(r.started_at) >= since)
+      .toSorted((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at));
+    const entries = records.map((r): Tracked => ({
+      launch: {
+        adw_id: r.adw_id, argv: r.argv, ...commandsFor(r.argv), adw: r.adw, continuing: r.continuing,
+        rerun: r.rerun, started_at: r.started_at, exit_code: r.exit_code, issue: r.issue,
+      },
+      exited: r.exited, logFrom: r.log_from, processesBefore: r.processes_before, claimsBefore: r.claims_before,
+      pid: r.pid, recovered: true, checkedAt: 0, checking: false,
+    })).filter((entry) => this.view(entry, false).state !== "started");
+    await Promise.all(entries.filter((entry) => !entry.exited).map((entry) => this.check(entry)));
+    for (const entry of entries) this.entries.set(entry.launch.adw_id, entry);
+  }
+
+  /** Ask procs.py whether a recovered Launch's process still runs; once it doesn't, its record says so. */
+  private async check(entry: Tracked): Promise<void> {
+    entry.checking = true;
+    try {
+      const running = entry.pid !== null
+        && await this.stillRunning(entry.pid, entry.launch.argv, entry.launch.adw_id);
+      if (!running) {
+        entry.exited = true;
+        this.save(entry);
+      }
+    } catch (error) {
+      // Unknown isn't exited: calling it Refused would free its issue for a second Launch. Asked again later.
+      console.error(`[sssf] could not tell whether Launch ${entry.launch.adw_id} still runs:`, (error as Error).message);
+    } finally {
+      entry.checking = false;
+      entry.checkedAt = Date.now();
+    }
+  }
+
+  /** Write a Launch's record beside its log. A failed write costs only its recovery, never the Launch. */
+  private save(entry: Tracked, dismissed = false): void {
+    const { launch } = entry;
+    const record: LaunchRecord = {
+      adw_id: launch.adw_id, adw: launch.adw, argv: launch.argv, command: launch.commands.posix,
+      started_at: launch.started_at, pid: entry.pid, continuing: launch.continuing, rerun: launch.rerun,
+      issue: launch.issue, exited: entry.exited, exit_code: launch.exit_code, log_from: entry.logFrom,
+      processes_before: entry.processesBefore, claims_before: entry.claimsBefore, dismissed,
+    };
+    try {
+      writeFileSync(join(this.sessionsDir, launch.adw_id, RECORD), `${JSON.stringify(record, null, 2)}\n`, "utf8");
+    } catch (error) {
+      console.error(`[sssf] could not record Launch ${launch.adw_id}:`, (error as Error).message);
+    }
+  }
 
   /** What a listing said the Tracker is; one that couldn't say leaves the last answer. */
   learnTracker(tracker: string | null): void {
@@ -403,6 +536,7 @@ export class Launches {
       logFrom: fstatSync(fd).size,
       processesBefore: continuing || rerun ? this.trace.adwProcessCount(preview.adw_id) : null,
       claimsBefore: this.trace.claimCount(preview.adw_id),
+      pid: null, recovered: false, checkedAt: 0, checking: false,
     };
     // Re-inserted, so a continued Run's Launch lists as the newest.
     this.entries.delete(preview.adw_id);
@@ -418,15 +552,19 @@ export class Launches {
       child.on("exit", (code) => {
         entry.launch.exit_code = code;
         entry.exited = true;
+        this.save(entry);
       });
       child.on("error", (error) => {   // e.g. uv not on PATH: the Launch is Refused, and says why
         appendFileSync(logPath, `[console] could not start: ${error.message}\n`, "utf8");
         entry.exited = true;
+        this.save(entry);
       });
       child.unref();
+      entry.pid = child.pid ?? null;
     } finally {
       closeSync(fd);
     }
+    this.save(entry);
     return this.view(entry);
   }
 
@@ -441,8 +579,9 @@ export class Launches {
 
   /**
    * Forget a Refused Launch, so a run of bad ones doesn't bury the Runs. Its
-   * log stays in its session dir and the trace is untouched (ADR 0001). A
-   * Starting one is still running: stopping it isn't dismissing it.
+   * log stays in its session dir and the trace is untouched (ADR 0001); its
+   * record says it was dismissed, so a restart forgets it too. A Starting one
+   * is still running: stopping it isn't dismissing it.
    */
   dismiss(adwId: string): void {
     const entry = this.entries.get(adwId);
@@ -450,6 +589,7 @@ export class Launches {
     const { state } = this.view(entry);
     if (state === "starting") throw new HttpError(409, `${adwId} is still starting: only a Refused Launch can be dismissed`);
     if (state !== "refused") throw new HttpError(409, `${adwId} became its Run: only a Refused Launch can be dismissed`);
+    this.save(entry, true);
     this.entries.delete(adwId);
   }
 
@@ -468,8 +608,12 @@ export class Launches {
     return join(this.sessionsDir, adwId, "console.log");
   }
 
-  private view(entry: Tracked): Launch {
+  /** With `recheck`, a recovered Launch still thought alive is asked after again, at most every RECHECK_MS. */
+  private view(entry: Tracked, recheck = true): Launch {
     const { adw_id } = entry.launch;
+    if (recheck && entry.recovered && !entry.exited && !entry.checking && Date.now() - entry.checkedAt > RECHECK_MS) {
+      void this.check(entry);
+    }
     // The trace is checked first: an ADW that joined it and then exited is a Run, not a refusal.
     const joined = entry.processesBefore === null
       ? this.trace.session(adw_id) !== null

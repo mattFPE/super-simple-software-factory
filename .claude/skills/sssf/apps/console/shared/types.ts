@@ -418,7 +418,10 @@ export type Shell = "posix" | "powershell";
  */
 export type LaunchState = "starting" | "refused" | "started";
 
-/** GET /api/launches: the Launches this server started, newest first. In memory only. */
+/**
+ * GET /api/launches: the Launches this server started, newest first, and
+ * today's that an earlier server started and that never became their Run.
+ */
 export interface Launch extends LaunchPreview {
   adw: string;
   /** A Resuming ADW continuing an existing Run: Starting until it joins that Run's trace. */
@@ -427,6 +430,7 @@ export interface Launch extends LaunchPreview {
   rerun: boolean;
   state: LaunchState;
   started_at: string;
+  /** Null while it runs, and when it exited unseen, while no server was there to watch. */
   exit_code: number | null;
   /** The last lines of the launch log: for a refused Launch, the ADW's own message. */
   log_tail: string;

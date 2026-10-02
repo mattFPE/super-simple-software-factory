@@ -277,5 +277,58 @@ class StopTest(unittest.TestCase):
         self.assertIn("no Run", json.loads(unknown.stdout)["error"])
 
 
+class RunningTest(unittest.TestCase):
+    """`procs.py running`: whether a pid still runs what was recorded, as Stop decides it.
+
+    The Console asks it of a Launch it recovered after a restart (#24): its own
+    child is gone, and only the pid and command it spawned are left on disk.
+    """
+
+    def setUp(self):
+        self.spawned: list[subprocess.Popen] = []
+
+    def tearDown(self):
+        for proc in self.spawned:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+    def running(self, pid: int, argv: list[str], adw_id: str) -> dict:
+        done = subprocess.run([sys.executable, str(PROCS), "running", str(pid),
+                               "--adw-id", adw_id, "--json", "--", *argv],
+                              env=env(), capture_output=True, text=True, encoding="utf-8",
+                              timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return json.loads(done.stdout)
+
+    def sleeper(self, *args: str) -> subprocess.Popen:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", *args],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.spawned.append(proc)
+        return proc
+
+    def test_a_pid_still_running_its_recorded_command_is_running(self):
+        launch = self.sleeper("adws/adw_hang.py", "--adw-id", ADW_ID)
+        argv = [sys.executable, "-c", "import time; time.sleep(300)", "adws/adw_hang.py", "--adw-id", ADW_ID]
+
+        self.assertEqual(self.running(launch.pid, argv, ADW_ID), {"running": True})
+
+    def test_a_pid_now_held_by_an_unrelated_process_is_not_running(self):
+        stranger = self.sleeper()
+
+        found = self.running(stranger.pid, ["uv", "run", "adws/adw_hang.py", "--adw-id", ADW_ID, "--", "x"], ADW_ID)
+
+        self.assertEqual(found, {"running": False})
+        self.assertIsNone(stranger.poll())
+
+    def test_a_pid_that_has_exited_is_not_running(self):
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+
+        found = self.running(gone.pid, [sys.executable, "-c", "pass", "--adw-id", ADW_ID], ADW_ID)
+
+        self.assertEqual(found, {"running": False})
+
+
 if __name__ == "__main__":
     unittest.main()

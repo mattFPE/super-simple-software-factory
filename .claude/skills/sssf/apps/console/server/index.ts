@@ -5,6 +5,8 @@
  *
  * It also launches ADWs (server/launches.ts). A Launch spawns the ADW, and the
  * ADW's own tracer writes the trace; the Console only reads it back (ADR 0001).
+ * Each Launch's log and record sit in its session dir, so a restart shows
+ * again the Launches that never became their Run.
  * Stop runs the factory's own verified kill, procs.py (server/stop.ts).
  *
  * It starts before the repo's first Run has created sssf.db, and reads as an
@@ -23,7 +25,7 @@ import { join, resolve, sep } from "node:path";
 import { TraceDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
 import { listReady } from "./issues.ts";
-import { stopRun } from "./stop.ts";
+import { stillRunning, stopRun } from "./stop.ts";
 import type { AgentPrompts, ApiError, HealthResponse, IssueListing, LaunchRequest } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
@@ -35,7 +37,10 @@ const launches: Launches = new Launches(resolveRepoRoot(dbPath), trace.sessionsD
   session: (adwId) => trace.read((db) => db.session(adwId), null),
   adwProcessCount: (adwId) => trace.read((db) => db.adwProcessCount(adwId), 0),
   claimCount: (adwId) => trace.read((db) => db.claimCount(adwId), 0),
-}, async () => (await readyIssues()).tracker);
+}, async () => (await readyIssues()).tracker,
+(pid, argv, adwId) => stillRunning(launches.repoRoot, pid, argv, adwId));
+// Today's Launches that never became their Run, read back from their records before any request.
+await launches.recover();
 
 /** The Ready issues, each listing also telling the Launches which Tracker this repo uses. */
 async function readyIssues(): Promise<IssueListing> {

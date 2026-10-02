@@ -5,14 +5,15 @@
  * `uv run`: adw_ok writes its session row (its request is the argv it was
  * given) and then waits, adw_refuse exits before writing any, adw_hang never
  * writes one. The stubs that wait keep going while the repo's `hold` file
- * exists, so a test decides when they finish.
+ * exists, so a test decides when they finish; `hold_row` holds adw_ok back
+ * from its row, and `hold_refuse` holds adw_refuse back from refusing.
  *
  *   bun test
  */
 import { Database } from "bun:sqlite";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AdwCatalog, HealthResponse, Launch, LaunchPreview, SessionDetail } from "../shared/types.ts";
@@ -20,7 +21,8 @@ import { APP_DIR, health, onCleanup, port as nextPort, serve, stop, tempDir, unt
 
 setDefaultTimeout(60_000);
 
-const TRACER = resolve(APP_DIR, "..", "..", "templates", "adws", "adw_modules", "tracer.py");
+const MODULES = resolve(APP_DIR, "..", "..", "templates", "adws", "adw_modules");
+const TRACER = join(MODULES, "tracer.py");
 const PROMPT = `it's "#42" — $(rm -rf ~) & echo pwned | x; \`y\` %PATH% ^& \\"\nsecond line\n`;
 
 const SHARED = [
@@ -77,6 +79,7 @@ const STUBS: Record<string, string> = {
     DESCRIBE_OK,
     `
 print("starting", adw_id(), flush=True)
+held("hold_row")
 with db() as c:
     c.execute("INSERT INTO sessions (adw_id, adw_name, request, status, engineer, started_at)"
               " VALUES (?, 'adw_ok', ?, 'running', 'stub', ?)",
@@ -89,6 +92,7 @@ with db() as c:
     "ADW Refuse — turns every request down before it starts.\n\nPhases: engineer(request) -> builder\n",
     DESCRIBE_PLAIN,
     `
+held("hold_refuse")
 for n in range(1, 41):
     print(f"preflight line {n}")
 print("agents.validate: no 'builder' agent in sssf.config.yaml", file=sys.stderr)
@@ -158,12 +162,17 @@ held()
 /**
  * A git repo with the stubs in adws/ and an empty trace db the real tracer's
  * schema built — or, `{ db: false }`, a fresh install no Run has traced yet.
+ * `{ modules: true }` adds the factory's real adw_modules, for procs.py.
  */
-function repo(adws: Record<string, string> = STUBS, { db: withDb = true } = {}): Repo {
+function repo(adws: Record<string, string> = STUBS, { db: withDb = true, modules = false } = {}): Repo {
   const root = tempDir();
   spawnSync("git", ["init", "-q"], { cwd: root });
   mkdirSync(join(root, "adws"), { recursive: true });
   for (const [name, source] of Object.entries(adws)) writeFileSync(join(root, "adws", name), source, "utf8");
+  if (modules) {
+    cpSync(MODULES, join(root, "adws", "adw_modules"),
+      { recursive: true, filter: (path) => !path.includes("__pycache__") });
+  }
   const path = join(root, "adws", "adw_data", "sssf.db");
   if (withDb) {
     mkdirSync(dirname(path), { recursive: true });
@@ -465,7 +474,7 @@ describe("a Launch", () => {
     expect(await health(r.port)).toBeNull();
 
     await startConsole(r);
-    expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);   // Launches are memory only
+    expect((await api<Launch[]>(r, "/api/launches")).body).toEqual([]);   // its Run is a Run now, not a Launch
     const status = async () => (await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`)).body.session?.status;
     expect(await status()).toBe("running");
     release(r.root);
@@ -483,6 +492,8 @@ describe("Continue with…", () => {
     release(r.root);
     const status = async () => (await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`)).body.session?.status;
     expect(await until(async () => (await status()) === "success", 30)).toBe(true);
+    // Its row settles before its process exits, and a Run whose process still runs can't be continued yet.
+    expect(await until(async () => (await launchState(r, started.adw_id))?.exit_code === 0, 30)).toBe(true);
     hold(r.root);
     return started.adw_id;
   }
@@ -610,6 +621,123 @@ describe("Dismiss", () => {
     await settlesAs(r, started.adw_id, "started");
     expect((await api(r, `/api/launches/${started.adw_id}/dismiss`, {})).status).toBe(409);
     expect((await launchState(r, started.adw_id))?.state).toBe("started");
+  });
+});
+
+const sessionDir = (r: Repo, adwId: string) => join(r.root, "adws", "adw_data", "sessions", adwId);
+
+/** Hold a stub at this file until the test removes it. */
+function pause(r: Repo, file: string): void {
+  writeFileSync(join(r.root, file), "", "utf8");
+  onCleanup(() => rmSync(join(r.root, file), { force: true }));
+}
+
+describe("after a Console restart", () => {
+  test("a Launch that was Starting is Starting again, then becomes its Run when its row appears", async () => {
+    const r = repo(STUBS, { modules: true });
+    pause(r, "hold_row");
+    const first = await startConsole(r);
+    const started = await launch(r, "adw_ok", { prompt: "outlive me" });
+    expect(await until(async () =>
+      (await api<string>(r, `/api/launches/${started.adw_id}/log`)).body.includes("starting"), 30)).toBe(true);
+    await stop(first);
+    const before = dbFiles(r);
+
+    await startConsole(r);
+    const recovered = await launchState(r, started.adw_id);
+    expect(recovered?.state).toBe("starting");
+    expect(recovered?.adw).toBe("adw_ok");
+    expect(recovered?.argv).toEqual(started.argv);
+    expect(recovered?.started_at).toBe(started.started_at);
+    expect(existsSync(join(sessionDir(r, started.adw_id), "launch.json"))).toBe(true);
+    expect(dbFiles(r)).toEqual(before);
+
+    rmSync(join(r.root, "hold_row"));
+    await settlesAs(r, started.adw_id, "started");
+  });
+
+  test("a recovered Starting Launch that exits afterwards becomes Refused, its exit code unknown", async () => {
+    const r = repo(STUBS, { modules: true });
+    const first = await startConsole(r);
+    const started = await launch(r, "adw_hang", { prompt: "look around" });
+    expect(await until(async () =>
+      (await api<string>(r, `/api/launches/${started.adw_id}/log`)).body.includes("resolving dependencies"), 30)).toBe(true);
+    await stop(first);
+
+    await startConsole(r);
+    expect((await launchState(r, started.adw_id))?.state).toBe("starting");
+    release(r.root);
+    const refused = await settlesAs(r, started.adw_id, "refused");
+    expect(refused.exit_code).toBeNull();
+    expect(refused.log_tail).toContain("resolving dependencies");
+  });
+
+  test("a Launch that refuses while the Console is down is Refused, with its log's tail", async () => {
+    const r = repo(STUBS, { modules: true });
+    pause(r, "hold_refuse");
+    const first = await startConsole(r);
+    const started = await launch(r, "adw_refuse", { prompt: "anything" });
+    await stop(first);
+    rmSync(join(r.root, "hold_refuse"));
+    const log = join(sessionDir(r, started.adw_id), "console.log");
+    expect(await until(async () => readFileSync(log, "utf8").includes("no 'builder' agent"), 30)).toBe(true);
+    const before = dbFiles(r);
+
+    await startConsole(r);
+    const refused = await settlesAs(r, started.adw_id, "refused");
+    expect(refused.exit_code).toBeNull();   // nobody was there to see it exit
+    expect(refused.log_tail).toContain("no 'builder' agent in sssf.config.yaml");
+    expect(dbFiles(r)).toEqual(before);
+  });
+
+  test("a recorded pid now held by an unrelated process is Refused, and left alone", async () => {
+    const r = repo(STUBS, { modules: true });
+    const stranger = spawn(process.execPath, ["-e", "setTimeout(() => {}, 300_000)"], { stdio: "ignore" });
+    onCleanup(() => stranger.kill());
+    const adwId = "recycled";
+    const argv = ["uv", "run", "adws/adw_hang.py", "--adw-id", adwId, "--", "look around"];
+    mkdirSync(sessionDir(r, adwId), { recursive: true });
+    writeFileSync(join(sessionDir(r, adwId), "console.log"), "resolving dependencies...\n", "utf8");
+    writeFileSync(join(sessionDir(r, adwId), "launch.json"), JSON.stringify({
+      adw_id: adwId, adw: "adw_hang", argv, command: argv.join(" "), started_at: new Date().toISOString(),
+      pid: stranger.pid,
+    }), "utf8");
+
+    await startConsole(r);
+    const recovered = await launchState(r, adwId);
+    expect(recovered?.state).toBe("refused");
+    expect(recovered?.exit_code).toBeNull();
+    expect(recovered?.log_tail).toContain("resolving dependencies");
+    // procs.py answered "not running", and only an answer is written back: a check that failed isn't.
+    expect(JSON.parse(readFileSync(join(sessionDir(r, adwId), "launch.json"), "utf8")).exited).toBe(true);
+    expect(stranger.exitCode).toBeNull();
+    expect(stranger.signalCode).toBeNull();
+  });
+
+  test("keeps a dismissed Launch dismissed, and reloads none from before today", async () => {
+    const r = repo(STUBS, { modules: true });
+    const first = await startConsole(r);
+    const kept = await launch(r, "adw_refuse", { prompt: "keep me" });
+    const dismissed = await launch(r, "adw_refuse", { prompt: "dismiss me" });
+    await settlesAs(r, kept.adw_id, "refused");
+    await settlesAs(r, dismissed.adw_id, "refused");
+    expect((await api(r, `/api/launches/${dismissed.adw_id}/dismiss`, {})).status).toBe(200);
+    // Yesterday's refusal, as its record would read now.
+    const record = JSON.parse(readFileSync(join(sessionDir(r, kept.adw_id), "launch.json"), "utf8"));
+    const old = "yesterday";
+    mkdirSync(sessionDir(r, old), { recursive: true });
+    writeFileSync(join(sessionDir(r, old), "console.log"), "refused yesterday\n", "utf8");
+    writeFileSync(join(sessionDir(r, old), "launch.json"), JSON.stringify({
+      ...record, adw_id: old, started_at: new Date(Date.now() - 86_400_000).toISOString(),
+    }), "utf8");
+    await stop(first);
+
+    await startConsole(r);
+    const listed = (await api<Launch[]>(r, "/api/launches")).body;
+    expect(listed.map((l) => l.adw_id)).toEqual([kept.adw_id]);
+    expect(listed[0]!.state).toBe("refused");
+    expect(listed[0]!.exit_code).toBe(3);   // it exited while the first Console watched
+    expect(existsSync(join(sessionDir(r, dismissed.adw_id), "console.log"))).toBe(true);
   });
 });
 

@@ -15,6 +15,11 @@ command line — `just kill` and the Console's Stop both run it:
 
     uv run adws/adw_modules/procs.py stop <adw_id> [--db adws/adw_data/sssf.db] [--json]
 
+The same check of a pid against its recorded command answers the Console when
+it recovers a Launch after a restart: is that Launch's process still running?
+
+    uv run adws/adw_modules/procs.py running <pid> [--adw-id <id>] [--json] -- <the argv it spawned>
+
 Run that way it re-enters through the package, so a Run it has to close for
 itself is closed by the tracer, and its issue released by issues.py.
 """
@@ -252,6 +257,12 @@ def live_commands(pids) -> dict[int, str]:
     return found
 
 
+def still_runs(pid: int, argv, adw_id: str = "") -> bool:
+    """Whether this pid still runs the argv it was started with: alive, and not a recycled pid."""
+    live = live_commands([pid]).get(pid)
+    return live is not None and command_matches(recorded_command(argv), live, adw_id)
+
+
 def _running(pid: int) -> bool:
     """Alive and not a zombie: a POSIX child that exited reads alive until reaped."""
     if not pid_alive(pid):
@@ -440,7 +451,16 @@ def main(argv: list[str] | None = None) -> int:
     stopping.add_argument("--grace", type=float, default=GRACE_SECONDS,
                           help="seconds the Run gets to settle itself before it is killed")
     stopping.add_argument("--json", action="store_true", help="print the report as JSON")
+    checking = commands.add_parser("running", help="whether a pid still runs the argv it was started with")
+    checking.add_argument("pid", type=int)
+    checking.add_argument("--adw-id", default="", help="the Run it belongs to, when its argv names it")
+    checking.add_argument("--json", action="store_true", help='print {"running": true|false}')
+    checking.add_argument("argv", nargs="+", help="the argv it was started with, after --")
     args = parser.parse_args(argv)
+    if args.command == "running":
+        alive = still_runs(args.pid, args.argv, args.adw_id)
+        print(json.dumps({"running": alive}) if args.json else ("running" if alive else "not running"))
+        return 0
     try:
         report = stop(args.db, args.adw_id, args.grace)
     except NotStoppable as refused:
