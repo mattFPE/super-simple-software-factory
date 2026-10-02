@@ -26,12 +26,15 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session,
 } from "../shared/types.ts";
+import { issueNamed } from "../shared/issues.ts";
 
 /** What Launches read back from the trace, which only the ADWs write (ADR 0001). */
 export interface Trace {
   session(adwId: string): Pick<Session, "status"> | null;
   /** ADW processes recorded under a Run: one more means a Resuming ADW has joined it. */
   adwProcessCount(adwId: string): number;
+  /** Whether a Run's Claim phase has logged its issue: until then, nothing on the Tracker says it's taken. */
+  claimed(adwId: string): boolean;
 }
 
 /** An error the route turns into this HTTP status rather than a 500. */
@@ -77,6 +80,14 @@ function readDocstring(source: string): { summary: string; phases: string | null
   }
   return { summary, phases: parts.join(" ").replace(/\s+/g, " ") };
 }
+
+/**
+ * How many phases a `Phases:` line names, for the default issue ADW: the
+ * longest committing chain. A retry loop, `[-> builder(fix) -> code(test) ...
+ * bounded]`, repeats phases already counted, so it adds none.
+ */
+const phaseCount = (phases: string | null): number =>
+  (phases ?? "").replace(/\[\s*->[^\]]*\]/g, "").split("->").filter((p) => p.replace(/[[\]]/g, "").trim()).length;
 
 function isDescription(value: unknown): value is AdwDescription {
   const d = value as AdwDescription;
@@ -183,7 +194,7 @@ function tailOf(path: string, from: number): string {
 
 /** A Launch this server spawned, and whether its process has exited. */
 interface Tracked {
-  launch: Omit<Launch, "state" | "log_tail">;
+  launch: Omit<Launch, "state" | "log_tail" | "holds_issue">;
   exited: boolean;
   /** Where this Launch's output begins in the log. */
   logFrom: number;
@@ -219,7 +230,14 @@ export class Launches {
       this.described.set(f, { stamp, info });
       return info;
     }));
-    return { adws, read_only: adws.length > 0 && adws.every((a) => a.predates_describe) };
+    const issueAdw = adws
+      .filter((a) => a.description?.commits && !a.description.resumes)
+      .reduce<AdwInfo | null>((best, a) => (!best || phaseCount(a.phases) > phaseCount(best.phases) ? a : best), null);
+    return {
+      adws,
+      read_only: adws.length > 0 && adws.every((a) => a.predates_describe),
+      default_issue_adw: issueAdw?.name ?? null,
+    };
   }
 
   private async describe(f: string, source: string): Promise<AdwInfo> {
@@ -237,10 +255,11 @@ export class Launches {
   async preview(req: LaunchRequest): Promise<LaunchPreview> {
     const preview = await this.plan(req);
     this.previewed.set(preview.adw_id, preview.argv);
-    return preview;
+    const { issue: _issue, ...shown } = preview;
+    return shown;
   }
 
-  private async plan(req: LaunchRequest): Promise<LaunchPreview> {
+  private async plan(req: LaunchRequest): Promise<LaunchPreview & { issue: number | null }> {
     if (typeof req?.adw !== "string" || typeof req.values !== "object" || req.values === null) {
       throw new HttpError(400, "a launch needs an adw and its values");
     }
@@ -278,7 +297,16 @@ export class Launches {
       throw new HttpError(409, `${adwId} is already a Run`);
     }
     const argv = ["uv", "run", info.file, ...argsFor(info, info.description, req.values, adwId)];
-    return { adw_id: adwId, argv, command: argv.map(shellQuote).join(" ") };
+    const prompt = info.description.options.find((o) => o.flag === null);
+    // Only an ADW that commits claims its issue; one that commits nothing leaves it as it was.
+    const claims = continues === undefined && info.description.commits && prompt;
+    const issue = claims ? issueNamed(req.values[prompt.name]) : null;
+    // Two Launches of one issue would race before the first one's Claim lands.
+    const holder = issue === null ? undefined : this.heldIssues().get(issue);
+    if (holder !== undefined) {
+      throw new HttpError(409, `#${issue} is already being launched as ${holder}: wait until its Run has claimed it`);
+    }
+    return { adw_id: adwId, argv, command: argv.map(shellQuote).join(" "), issue };
   }
 
   /**
@@ -333,6 +361,15 @@ export class Launches {
     return this.view(entry);
   }
 
+  /** Each issue a Launch holds until its Run's Claim lands, with that Launch's adw_id. */
+  heldIssues(): Map<number, string> {
+    const held = new Map<number, string>();
+    for (const entry of this.entries.values()) {
+      if (entry.launch.issue !== null && this.view(entry).holds_issue) held.set(entry.launch.issue, entry.launch.adw_id);
+    }
+    return held;
+  }
+
   list(): Launch[] {
     return [...this.entries.values()].toReversed().map((entry) => this.view(entry));
   }
@@ -355,7 +392,14 @@ export class Launches {
       ? this.trace.session(adw_id) !== null
       : this.trace.adwProcessCount(adw_id) > entry.processesBefore;
     const state = joined ? "started" : entry.exited ? "refused" : "starting";
+    // Between its row appearing and its Claim landing, the Tracker still calls the issue Runnable.
+    const unclaimed = state === "started" && !entry.exited
+      && this.trace.session(adw_id)?.status === "running" && !this.trace.claimed(adw_id);
+    const holds_issue = entry.launch.issue !== null && (state === "starting" || unclaimed);
     const path = this.logPath(adw_id);
-    return { ...entry.launch, state, log_tail: state === "started" || !path ? "" : tailOf(path, entry.logFrom) };
+    return {
+      ...entry.launch, state, holds_issue,
+      log_tail: state === "started" || !path ? "" : tailOf(path, entry.logFrom),
+    };
   }
 }

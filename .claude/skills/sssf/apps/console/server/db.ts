@@ -21,6 +21,7 @@ import type {
   Event,
   EventsPage,
   GateResult,
+  IssueRun,
   Phase,
   Session,
   SessionDetail,
@@ -229,6 +230,46 @@ export class SssfDb {
         )
         .get(adwId)?.n ?? 0
     );
+  }
+
+  /**
+   * Each issue's most recent Run, by the issue URL its Claim phase logged
+   * (issues.claim), so a claimed issue can link to the Run working on it.
+   */
+  claimedRuns(): Map<string, IssueRun> {
+    const rows = this.db
+      .query<IssueRun & { payload_json: string | null }, []>(
+        `SELECT s.adw_id, ${this.optionalColumn("sessions", "adw_name")}, s.status, e.payload_json
+           FROM events e
+           JOIN phases p ON p.phase_id = e.phase_id
+           JOIN sessions s ON s.adw_id = p.adw_id
+          WHERE p.name = 'claim' AND e.type = 'log'
+          ORDER BY s.started_at, e.rowid`,
+      )
+      .all();
+    const runs = new Map<string, IssueRun>();
+    for (const { payload_json, ...run } of rows) {
+      let issue: unknown;
+      try {
+        issue = (JSON.parse(payload_json ?? "null") as { issue?: unknown } | null)?.issue;
+      } catch {
+        continue;
+      }
+      if (typeof issue === "string") runs.set(issue, run);   // later Runs overwrite earlier ones
+    }
+    return runs;
+  }
+
+  /** Whether this Run's Claim phase has logged the issue it claimed. */
+  claimed(adwId: string): boolean {
+    return (
+      this.db
+        .query<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n FROM events e JOIN phases p ON p.phase_id = e.phase_id
+            WHERE p.adw_id = ? AND p.name = 'claim' AND e.type = 'log'`,
+        )
+        .get(adwId)?.n ?? 0
+    ) > 0;
   }
 
   phases(adwId: string): Phase[] {

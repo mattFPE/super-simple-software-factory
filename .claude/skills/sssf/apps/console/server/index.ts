@@ -19,6 +19,7 @@ import { existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { SssfDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
+import { listReady } from "./issues.ts";
 import { stopRun } from "./stop.ts";
 import type { AgentPrompts, ApiError, HealthResponse, LaunchRequest } from "../shared/types.ts";
 
@@ -148,6 +149,15 @@ const server = Bun.serve({
 
     // The repo's ADWs, each with the command line its --describe reports.
     "/api/adws": safely(async () => json(await launches.catalog())),
+
+    // The repo's Ready issues with their verdicts, read fresh each time it is asked:
+    // the UI asks on open, on refresh and after each Launch settles, and never on a timer.
+    "/api/issues": safely(async () =>
+      json(await listReady(launches.repoRoot, {
+        claimedRuns: () => db.claimedRuns(),
+        heldIssues: () => launches.heldIssues(),
+      })),
+    ),
 
     "/api/launches": {
       GET: safely(() => json(launches.list())),

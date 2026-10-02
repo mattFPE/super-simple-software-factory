@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
-import type { AdwOption, LaunchPreview, LaunchRequest } from '../lib/types'
+import type { AdwOption, LaunchPreview, LaunchRequest, ReadyIssue } from '../lib/types'
+import { issueNamed } from '@shared/issues'
 import { fetchAdws, previewLaunch, startLaunch } from '../lib/api'
 import { addLaunch, catalog, continuing, resumingAdws } from '../lib/launches'
 import { messageOf } from '../lib/format'
+import IssuesPanel from './IssuesPanel.vue'
 
 const LAST_ADW = 'sssf.console.last-adw'
 
@@ -30,6 +32,15 @@ const adw = computed(() => launchable.value.find((a) => a.name === chosen.value)
 
 /** The prompt and any other positionals, then the options; the id is the Console's to mint. */
 const positionals = computed(() => adw.value?.description?.options.filter((o) => o.flag === null) ?? [])
+/** The positional an issue reference goes into: the ADW's prompt. */
+const promptOption = computed(() => positionals.value[0] ?? null)
+
+/** The issue the prompt names, when the chosen ADW won't claim or close it because it commits nothing. */
+const readOnlyIssue = computed(() => {
+  const issue = promptOption.value ? issueNamed(texts[promptOption.value.name]) : null
+  return issue !== null && adw.value?.description?.commits === false ? issue : null
+})
+
 const options = computed(
   () => adw.value?.description?.options.filter((o) => o.flag !== null && o.name !== 'adw_id') ?? [],
 )
@@ -73,11 +84,35 @@ onMounted(async () => {
   }
 })
 
-watch(chosen, (name) => {
+/** The issue pickIssue is switching the ADW for: it goes into the new ADW's prompt once the form clears. */
+let pickedPrompt: string | null = null
+
+watch(chosen, (name, before) => {
+  // A picked issue stays the prompt when the engineer tries another ADW for it.
+  const was = launchable.value.find((a) => a.name === before)?.description?.options.find((o) => o.flag === null)
+  const carried = pickedPrompt ?? (was && issueNamed(texts[was.name]) !== null ? texts[was.name]! : null)
   clearForm()
-  // A Resuming ADW is picked per Run, so it never becomes the fresh-Launch default.
-  if (name && !continuing.value) remember(name)
+  if (carried !== null && promptOption.value) texts[promptOption.value.name] = carried
+  // The default issue ADW was chosen for the issue, not by the engineer, so it isn't remembered;
+  // nor is a Resuming ADW, picked per Run, ever the fresh-Launch default.
+  if (name && pickedPrompt === null && !continuing.value) remember(name)
+  pickedPrompt = null
 })
+
+/** Picking an issue fills the prompt with its reference and selects the default issue ADW. */
+function pickIssue(issue: ReadyIssue): void {
+  const prompt = `#${issue.number}`
+  const target = catalog.value?.default_issue_adw
+  if (target && target !== chosen.value) {
+    pickedPrompt = prompt
+    chosen.value = target
+  } else if (promptOption.value) {
+    preview.value = null
+    formError.value = null
+    texts[promptOption.value.name] = prompt
+  }
+  pane.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 
 // A card's "Continue with…" picked a Run and an ADW: the form takes both, and comes into view.
 watch(continuing, (next, before) => {
@@ -230,6 +265,11 @@ const locked = computed(() => busy.value || preview.value !== null)
           <span v-if="o.help" class="help">{{ o.help }}</span>
         </div>
 
+        <div v-if="readOnlyIssue !== null" class="note">
+          {{ adw.name }} commits nothing, so it won't claim #{{ readOnlyIssue }} or close it: the issue stays
+          open and Ready.
+        </div>
+
         <div v-if="formError" class="error-text">{{ formError }}</div>
 
         <div v-if="preview" class="confirm">
@@ -245,6 +285,9 @@ const locked = computed(() => busy.value || preview.value !== null)
         </div>
       </template>
     </form>
+
+    <!-- A typed prompt launches whether or not the issues are available. -->
+    <IssuesPanel v-if="catalog && !catalog.read_only && !continuing" :disabled="locked" @pick="pickIssue" />
   </section>
 </template>
 
@@ -398,6 +441,11 @@ button.primary {
 button:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.note {
+  color: var(--amber);
+  overflow-wrap: anywhere;
 }
 
 .error-text {

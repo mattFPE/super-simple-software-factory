@@ -361,6 +361,12 @@ export interface AdwCatalog {
   adws: AdwInfo[];
   /** Every ADW here predates `--describe`, so nothing can launch until the repo updates sssf. */
   read_only: boolean;
+  /**
+   * The ADW picking an issue selects: the committing, non-resuming one with
+   * the most phases, so the default Launch claims the issue and lands a PR
+   * that closes it. Null when no ADW here commits.
+   */
+  default_issue_adw: string | null;
 }
 
 /** POST /api/launches/preview and POST /api/launches */
@@ -405,6 +411,72 @@ export interface Launch extends LaunchPreview {
   exit_code: number | null;
   /** The last lines of the launch log: for a refused Launch, the ADW's own message. */
   log_tail: string;
+  /** The issue this Launch's Run will Claim: one its prompt names, for an ADW that commits; else null. */
+  issue: number | null;
+  /**
+   * It holds its issue: Starting, or started with its Claim not yet landed —
+   * while the Tracker would still call the issue Runnable, so no second
+   * Launch of it may start.
+   */
+  holds_issue: boolean;
+}
+
+// ── Ready issues ─────────────────────────────────────────────────────────────
+
+/** Another issue, as `--list-ready` names it. */
+export interface IssueLink {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  labels: string[];
+}
+
+/** Why a Ready issue isn't Runnable, as a Launch of it would say: the first of its problems. */
+export type IssueVerdict = "runnable" | "blocked" | "spec" | "claimed" | "open_pr" | "closed";
+
+/** The most recent Run whose Claim phase logged this issue, read from the trace. */
+export interface IssueRun {
+  adw_id: string;
+  adw_name: string | null;
+  status: SessionStatus | null;
+}
+
+export interface ReadyIssue {
+  number: number;
+  title: string;
+  url: string;
+  verdict: IssueVerdict;
+  /** What a Launch of it would refuse with; null when it is Runnable. */
+  why: string | null;
+  /** blocked: the open issues it waits on. */
+  blocked_by: IssueLink[];
+  /** spec: its Tickets, and the Runnable ones to run instead. */
+  tickets: IssueLink[];
+  run_instead: IssueLink[];
+  /** open_pr: the open PRs that already close it. */
+  prs: string[];
+  /** Added by the Console from the trace, never by GitHub. */
+  run: IssueRun | null;
+  /** The adw_id of a Launch holding this issue until its Claim lands: it can't be launched again yet. */
+  held_by: string | null;
+}
+
+/**
+ * GET /api/issues: `issues.py --list-ready --json`, Runnable issues first,
+ * with each issue's Run and Starting Launch added. Read only when asked —
+ * the Console never polls GitHub.
+ */
+export interface IssueListing {
+  tracker: string | null;
+  repo: string | null;
+  ready_label: string | null;
+  available: boolean;
+  /** Why issues aren't available, in one line, and what to do about it. */
+  unavailable: { reason: string; fix: string } | null;
+  issues: ReadyIssue[];
+  /** There were more Ready issues than the listing shows. */
+  truncated: boolean;
 }
 
 /**

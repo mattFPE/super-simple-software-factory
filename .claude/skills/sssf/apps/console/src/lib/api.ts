@@ -5,6 +5,7 @@ import type {
   EventsPage,
   GateResult,
   HealthResponse,
+  IssueListing,
   Launch,
   LaunchPreview,
   LaunchRequest,
@@ -121,4 +122,9 @@ export async function fetchLaunchLog(adwId: string): Promise<string> {
 /** Stop a running Run with the factory's verified kill (procs.py stop). */
 export function stopRun(adwId: string): Promise<StopReport> {
   return postJson(`/api/sessions/${encodeURIComponent(adwId)}/stop`, {}) as Promise<StopReport>
+}
+
+/** The repo's Ready issues, with their verdicts. Asks GitHub, so it is never polled. */
+export function fetchIssues(): Promise<IssueListing> {
+  return getJson('/api/issues') as Promise<IssueListing>
 }
