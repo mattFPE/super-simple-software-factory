@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { IssueListing, IssueRerun, IssueRun, ReadyIssue } from "../shared/types.ts";
-import { claimingAdw } from "../shared/issues.ts";
+import { claimingAdw, issueRef } from "../shared/issues.ts";
 
 const ISSUES = "adws/adw_modules/issues.py";
 // Past a first `uv run` resolving deps: one page of issues plus a read per issue.
@@ -25,7 +25,8 @@ const PREDATES = {
 /** What the listing needs from the rest of the server. */
 export interface IssueContext {
   claimedRuns(): Map<string, IssueRun>;
-  heldIssues(): Map<number, string>;
+  /** By issue reference: `#42`, or a local issue's path. */
+  heldIssues(): Map<string, string>;
 }
 
 function unavailable(why: NonNullable<IssueListing["unavailable"]>): IssueListing {
@@ -80,9 +81,9 @@ export async function listReady(repoRoot: string, context: IssueContext): Promis
     const logged = runs.get(issue.url);
     // A worktree counts only while it is still on disk: one removed by hand can't be picked back up.
     const run = logged ? { ...logged, worktree: logged.worktree && existsSync(logged.worktree) ? logged.worktree : null } : null;
-    return { ...issue, run, rerun: rerunOf(issue, run), held_by: held.get(issue.number) ?? null };
+    return { ...issue, run, rerun: rerunOf(issue, run), held_by: held.get(issueRef(issue)) ?? null };
   });
-  // A stable sort: within each half, the order GitHub gave.
+  // A stable sort: within each half, the order the Tracker gave.
   issues.sort((a, b) => Number(b.verdict === "runnable") - Number(a.verdict === "runnable"));
   return { ...listing, issues };
 }

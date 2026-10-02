@@ -21,7 +21,7 @@ import { SssfDb, resolveDbPath } from "./db.ts";
 import { HttpError, Launches, resolveRepoRoot } from "./launches.ts";
 import { listReady } from "./issues.ts";
 import { stopRun } from "./stop.ts";
-import type { AgentPrompts, ApiError, HealthResponse, LaunchRequest } from "../shared/types.ts";
+import type { AgentPrompts, ApiError, HealthResponse, IssueListing, LaunchRequest } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
 const DIST_DIR = resolve(import.meta.dir, "..", "dist");
@@ -34,7 +34,18 @@ try {
   console.error(`[sssf] ${(error as Error).message}`);
   process.exit(1);
 }
-const launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir, db);
+const launches: Launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir, db,
+  async () => (await readyIssues()).tracker);
+
+/** The Ready issues, each listing also telling the Launches which Tracker this repo uses. */
+async function readyIssues(): Promise<IssueListing> {
+  const listing = await listReady(launches.repoRoot, {
+    claimedRuns: () => db.claimedRuns(),
+    heldIssues: () => launches.heldIssues(),
+  });
+  launches.learnTracker(listing.tracker);
+  return listing;
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -152,12 +163,7 @@ const server = Bun.serve({
 
     // The repo's Ready issues with their verdicts, read fresh each time it is asked:
     // the UI asks on open, on refresh and after each Launch settles, and never on a timer.
-    "/api/issues": safely(async () =>
-      json(await listReady(launches.repoRoot, {
-        claimedRuns: () => db.claimedRuns(),
-        heldIssues: () => launches.heldIssues(),
-      })),
-    ),
+    "/api/issues": safely(async () => json(await readyIssues())),
 
     "/api/launches": {
       GET: safely(() => json(launches.list())),

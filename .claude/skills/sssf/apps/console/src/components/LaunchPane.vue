@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import type { AdwOption, IssueRerun, LaunchPreview, LaunchRequest, ReadyIssue } from '../lib/types'
-import { issueNamed } from '@shared/issues'
+import { issueNamed, issueRef } from '@shared/issues'
 import { fetchAdws, previewLaunch, startLaunch } from '../lib/api'
 import { addLaunch, catalog, continuing, resumingAdws } from '../lib/launches'
 import { messageOf } from '../lib/format'
+import { issues } from '../lib/issues'
 import IssuesPanel from './IssuesPanel.vue'
 
 const LAST_ADW = 'sssf.console.last-adw'
@@ -35,9 +36,12 @@ const positionals = computed(() => adw.value?.description?.options.filter((o) =>
 /** The positional an issue reference goes into: the ADW's prompt. */
 const promptOption = computed(() => positionals.value[0] ?? null)
 
+/** The issue a prompt names: whether a path does is the repo's Tracker's to say, as the listing names it. */
+const named = (prompt: string | undefined): string | null => issueNamed(prompt, issues.value?.tracker ?? null)
+
 /** The issue the prompt names, when the chosen ADW won't claim or close it because it commits nothing. */
 const readOnlyIssue = computed(() => {
-  const issue = promptOption.value ? issueNamed(texts[promptOption.value.name]) : null
+  const issue = promptOption.value ? named(texts[promptOption.value.name]) : null
   return issue !== null && adw.value?.description?.commits === false ? issue : null
 })
 
@@ -50,7 +54,7 @@ const options = computed(
  * that Run's ADW under its adw_id, or afresh with `--force`. Choosing another
  * ADW, or a fresh Launch, drops it.
  */
-const rerunning = shallowRef<(IssueRerun & { issue: number }) | null>(null)
+const rerunning = shallowRef<(IssueRerun & { issue: string }) | null>(null)
 
 function remembered(): string | null {
   try {
@@ -91,20 +95,35 @@ onMounted(async () => {
   }
 })
 
-/** The issue pickIssue is switching the ADW for: it goes into the new ADW's form once the form clears. */
-let picked: { prompt: string; force: boolean } | null = null
+/**
+ * A picked issue: its reference, `--force` exactly when its Rerun says so, and
+ * the landing flag it defaults to when there is one to show.
+ */
+interface Pick {
+  prompt: string
+  force: boolean
+  land: string | null
+}
 
-/** Fill the form with a picked issue: its reference, and `--force` exactly when its Rerun says so. */
-function fillPicked(pick: { prompt: string; force: boolean }): void {
+/** The issue pickIssue is switching the ADW for: it goes into the new ADW's form once the form clears. */
+let picked: Pick | null = null
+
+/** Fill the form with a picked issue. */
+function fillPicked(pick: Pick): void {
   if (promptOption.value) texts[promptOption.value.name] = pick.prompt
   const force = options.value.find((o) => o.flag === '--force' && o.kind === 'flag')
   if (force) flags[force.name] = pick.force
+  // Its landing alone, or none: a Rerun's command is its outcome comment's, which names none.
+  const landing = adw.value?.description?.mutually_exclusive.find((group) => group.includes('--merge')) ?? []
+  for (const o of options.value) {
+    if (o.kind === 'flag' && o.flag && landing.includes(o.flag)) flags[o.name] = o.flag === pick.land
+  }
 }
 
 watch(chosen, (name, before) => {
   // A picked issue stays the prompt when the engineer tries another ADW for it.
   const was = launchable.value.find((a) => a.name === before)?.description?.options.find((o) => o.flag === null)
-  const carried = was && issueNamed(texts[was.name]) !== null ? texts[was.name]! : null
+  const carried = was && named(texts[was.name]) !== null ? texts[was.name]! : null
   clearForm()
   if (picked) fillPicked(picked)
   else if (carried !== null && promptOption.value) texts[promptOption.value.name] = carried
@@ -118,13 +137,16 @@ watch(chosen, (name, before) => {
 
 /**
  * Picking an issue fills the prompt with its reference and selects the default
- * issue ADW. Its Rerun instead selects the ADW its failed Run ran, and either
- * reruns under that Run's adw_id or ticks `--force`.
+ * issue ADW. A local issue lands with `--merge` by default, which the ADW
+ * applies on its own; ticking it shows that landing in the confirm step. Its
+ * Rerun instead selects the ADW its failed Run ran, and either reruns under
+ * that Run's adw_id or ticks `--force`, as its outcome comment's command does.
  */
 function pickIssue(issue: ReadyIssue, rerun?: IssueRerun): void {
-  const pick = { prompt: `#${issue.number}`, force: rerun?.force ?? false }
+  const reference = issueRef(issue)
+  const pick = { prompt: reference, force: rerun?.force ?? false, land: issue.path && !rerun ? '--merge' : null }
   const target = rerun?.adw ?? catalog.value?.default_issue_adw
-  rerunning.value = rerun ? { ...rerun, issue: issue.number } : null
+  rerunning.value = rerun ? { ...rerun, issue: reference } : null
   if (target && target !== chosen.value) {
     picked = pick
     chosen.value = target
@@ -247,11 +269,11 @@ const locked = computed(() => busy.value || preview.value !== null)
             <span class="run-id">{{ rerunning.adw_id }}</span>
           </span>
           <span class="help">
-            Reruns #{{ rerunning.issue }} under its failed Run, picking that Run’s kept worktree back up.
+            Reruns {{ rerunning.issue }} under its failed Run, picking that Run’s kept worktree back up.
           </span>
         </template>
         <span v-else class="help">
-          Reruns #{{ rerunning.issue }} afresh with <span class="flag">--force</span>: its failed Run left
+          Reruns {{ rerunning.issue }} afresh with <span class="flag">--force</span>: its failed Run left
           <a :href="rerunning.pr ?? undefined" target="_blank" rel="noopener">{{ rerunning.pr }}</a> open. Close it,
           or fix it instead of rerunning.
         </span>
@@ -312,7 +334,7 @@ const locked = computed(() => busy.value || preview.value !== null)
         </div>
 
         <div v-if="readOnlyIssue !== null" class="note">
-          {{ adw.name }} commits nothing, so it won't claim #{{ readOnlyIssue }} or close it: the issue stays
+          {{ adw.name }} commits nothing, so it won't claim {{ readOnlyIssue }} or close it: the issue stays
           open and Ready.
         </div>
 

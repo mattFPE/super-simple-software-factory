@@ -27,7 +27,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session,
 } from "../shared/types.ts";
-import { claimingAdw, issueNamed } from "../shared/issues.ts";
+import { LOCAL_TRACKER, claimingAdw, issueNamed } from "../shared/issues.ts";
 
 /** What Launches read back from the trace, which only the ADWs write (ADR 0001). */
 export interface Trace {
@@ -135,10 +135,12 @@ export function shellQuote(arg: string): string {
  * listed them, the minted id, then `--` and the positionals. After `--` argparse
  * reads a prompt such as "--help" as text, and a value that starts with "-" goes
  * as `--flag=value` for the same reason. An issue reference, which can't be read
- * as an option, goes first instead: `"#42" --adw-id …`, the shape the ADWs'
- * outcome comments give for a rerun.
+ * as an option, goes first instead: `"#42" --adw-id …` or `.scratch/…/03-x.md
+ * --adw-id …`, the shape the ADWs' outcome comments give for a rerun.
  */
-function argsFor(info: AdwInfo, description: AdwDescription, values: LaunchRequest["values"], adwId: string): string[] {
+function argsFor(
+  info: AdwInfo, description: AdwDescription, values: LaunchRequest["values"], adwId: string, tracker: string | null,
+): string[] {
   const known = new Map(description.options.map((o) => [o.name, o]));
   for (const name of Object.keys(values)) {
     if (name === "adw_id") throw new HttpError(400, "adw_id is minted by the Console, not set in the form");
@@ -178,7 +180,7 @@ function argsFor(info: AdwInfo, description: AdwDescription, values: LaunchReque
     if (v !== null) args.push(...(v.startsWith("-") ? [`${o.flag}=${v}`] : [o.flag!, v]));
   }
   args.push("--adw-id", adwId);
-  if (positionals.length === 1 && issueNamed(positionals[0]) !== null) return [positionals[0]!, ...args];
+  if (positionals.length === 1 && issueNamed(positionals[0], tracker) !== null) return [positionals[0]!, ...args];
   return positionals.length ? [...args, "--", ...positionals] : args;
 }
 
@@ -217,6 +219,12 @@ export class Launches {
   private readonly entries = new Map<string, Tracked>();
   /** The argv each preview showed, by its minted id: a Launch runs only what was confirmed. */
   private readonly previewed = new Map<string, string[]>();
+  /**
+   * The repo's Tracker, as its last `--list-ready` named it: in a Local Markdown
+   * repo a prompt that is a local issue's path names that issue. Null until a
+   * listing names one; a path prompt before then asks for a listing first.
+   */
+  private tracker: string | null = null;
   /** --describe output per ADW, kept until the file or the shared CLI module changes. */
   private readonly described = new Map<string, { stamp: string; info: AdwInfo }>();
 
@@ -224,7 +232,14 @@ export class Launches {
     readonly repoRoot: string,
     private readonly sessionsDir: string,
     private readonly trace: Trace,
+    /** The Tracker issues.py names, when no listing has named it yet. */
+    private readonly readTracker: () => Promise<string | null>,
   ) {}
+
+  /** What a listing said the Tracker is; one that couldn't say leaves the last answer. */
+  learnTracker(tracker: string | null): void {
+    if (tracker) this.tracker = tracker;
+  }
 
   async catalog(): Promise<AdwCatalog> {
     const dir = join(this.repoRoot, "adws");
@@ -270,7 +285,7 @@ export class Launches {
     return shown;
   }
 
-  private async plan(req: LaunchRequest): Promise<LaunchPreview & { issue: number | null }> {
+  private async plan(req: LaunchRequest): Promise<LaunchPreview & { issue: string | null }> {
     if (typeof req?.adw !== "string" || typeof req.values !== "object" || req.values === null) {
       throw new HttpError(400, "a launch needs an adw and its values");
     }
@@ -316,15 +331,20 @@ export class Launches {
     } else if (this.entries.has(adwId) || this.trace.session(adwId)) {
       throw new HttpError(409, `${adwId} is already a Run`);
     }
-    const argv = ["uv", "run", info.file, ...argsFor(info, info.description, req.values, adwId)];
+    // Only a prompt that would be a local issue needs the Tracker: in a GitHub repo it is a request file.
+    const text = req.values[info.description.options.find((o) => o.flag === null)?.name ?? ""];
+    if (this.tracker === null && issueNamed(text, LOCAL_TRACKER)?.startsWith(".scratch/")) {
+      this.learnTracker(await this.readTracker());
+    }
+    const argv = ["uv", "run", info.file, ...argsFor(info, info.description, req.values, adwId, this.tracker)];
     const prompt = info.description.options.find((o) => o.flag === null);
     // Only an ADW that commits claims its issue; one that commits nothing leaves it as it was.
     const claims = continues === undefined && info.description.commits && prompt;
-    const issue = claims ? issueNamed(req.values[prompt.name]) : null;
+    const issue = claims ? issueNamed(req.values[prompt.name], this.tracker) : null;
     // Two Launches of one issue would race before the first one's Claim lands.
     const holder = issue === null ? undefined : this.heldIssues().get(issue);
     if (holder !== undefined) {
-      throw new HttpError(409, `#${issue} is already being launched as ${holder}: wait until its Run has claimed it`);
+      throw new HttpError(409, `${issue} is already being launched as ${holder}: wait until its Run has claimed it`);
     }
     return { adw_id: adwId, argv, command: argv.map(shellQuote).join(" "), issue };
   }
@@ -386,8 +406,8 @@ export class Launches {
   }
 
   /** Each issue a Launch holds until its Run's Claim lands, with that Launch's adw_id. */
-  heldIssues(): Map<number, string> {
-    const held = new Map<number, string>();
+  heldIssues(): Map<string, string> {
+    const held = new Map<string, string>();
     for (const entry of this.entries.values()) {
       if (entry.launch.issue !== null && this.view(entry).holds_issue) held.set(entry.launch.issue, entry.launch.adw_id);
     }

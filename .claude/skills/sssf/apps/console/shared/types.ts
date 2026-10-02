@@ -419,8 +419,11 @@ export interface Launch extends LaunchPreview {
   exit_code: number | null;
   /** The last lines of the launch log: for a refused Launch, the ADW's own message. */
   log_tail: string;
-  /** The issue this Launch's Run will Claim: one its prompt names, for an ADW that commits; else null. */
-  issue: number | null;
+  /**
+   * The issue this Launch's Run will Claim, as its reference (`#42`, or a local
+   * issue's path): one its prompt names, for an ADW that commits; else null.
+   */
+  issue: string | null;
   /**
    * It holds its issue: Starting, or started with its Claim not yet landed —
    * while the Tracker would still call the issue Runnable, so no second
@@ -433,9 +436,13 @@ export interface Launch extends LaunchPreview {
 
 /** Another issue, as `--list-ready` names it. */
 export interface IssueLink {
-  number: number;
+  /** A local Spec has none. */
+  number: number | null;
   title: string;
+  /** A local issue's is its path. */
   url: string;
+  /** A local issue's repo-relative path; null on GitHub. */
+  path: string | null;
   state: string;
   labels: string[];
 }
@@ -470,9 +477,13 @@ export interface IssueRerun {
 }
 
 export interface ReadyIssue {
-  number: number;
+  /** A local Spec has none: a local issue is named by its path. */
+  number: number | null;
   title: string;
+  /** A local issue's is its path. */
   url: string;
+  /** A local issue's repo-relative path; null on GitHub. */
+  path: string | null;
   verdict: IssueVerdict;
   /** What a Launch of it would refuse with; null when it is Runnable. */
   why: string | null;

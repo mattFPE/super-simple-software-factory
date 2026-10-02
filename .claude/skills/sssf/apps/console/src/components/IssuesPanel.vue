@@ -4,6 +4,7 @@ import type { IssueLink, IssueRerun, ReadyIssue } from '../lib/types'
 import { issues, issuesError, issuesLoading, loadIssuesOnce, refreshIssues } from '../lib/issues'
 import { launches } from '../lib/launches'
 import { hrefFor } from '../lib/router'
+import { issueRef } from '@shared/issues'
 
 defineProps<{ disabled: boolean }>()
 /** Pick launches it afresh; a Rerun follows what its failed Run's outcome comment says to type. */
@@ -11,10 +12,26 @@ const emit = defineEmits<{ pick: [issue: ReadyIssue, rerun?: IssueRerun] }>()
 
 onMounted(loadIssuesOnce)
 
-const flashed = ref<number | null>(null)
+const flashed = ref<string | null>(null)
 
-/** Listed issue numbers, so a link to one jumps within the list instead of leaving for GitHub. */
-const listed = computed(() => new Set(issues.value?.issues.map((i) => i.number) ?? []))
+/** Listed issues by reference, so a link to one jumps within the list instead of leaving it. */
+const listed = computed(() => new Set(issues.value?.issues.map(issueRef) ?? []))
+
+/** A link's reference: `#42`, a local issue's path, or — naming no file — what it said. */
+const refOf = (link: Pick<IssueLink, 'number' | 'path' | 'title'>): string => (link.path || link.number !== null ? issueRef(link) : link.title)
+
+/**
+ * How a row names an issue: `#42`, or a local one by its feature and number
+ * (`widgets/03`, `widgets/spec`), since its full path is long. The path is its title.
+ */
+function labelOf(link: IssueLink | ReadyIssue): string {
+  const local = link.path ? /^\.scratch\/([^/]+)\/(?:issues\/(\d+)-|(spec))/.exec(link.path) : null
+  if (local) return `${local[1]}/${local[2] ?? local[3]}`
+  return refOf(link)
+}
+
+/** A GitHub issue opens on GitHub; a local one is a file in the checkout, with nowhere to go. */
+const hrefOf = (link: IssueLink | ReadyIssue): string | undefined => (link.path ? undefined : link.url || undefined)
 
 const runnable = (issue: ReadyIssue): boolean => issue.verdict === 'runnable'
 
@@ -23,7 +40,7 @@ const runnable = (issue: ReadyIssue): boolean => issue.verdict === 'runnable'
  * polled with the Runs, so this stays live without asking GitHub again.
  */
 function heldBy(issue: ReadyIssue): string | null {
-  const live = launches.value.find((l) => l.adw_id === issue.held_by || l.issue === issue.number)
+  const live = launches.value.find((l) => l.adw_id === issue.held_by || l.issue === issueRef(issue))
   return live ? (live.holds_issue ? live.adw_id : null) : issue.held_by
 }
 
@@ -31,12 +48,13 @@ function heldBy(issue: ReadyIssue): string | null {
 const ticketsOf = (issue: ReadyIssue): IssueLink[] => (issue.run_instead.length ? issue.run_instead : issue.tickets)
 
 function jump(link: IssueLink, event: MouseEvent): void {
-  if (!listed.value.has(link.number)) return   // not in the list: the link goes to GitHub
+  const key = refOf(link)
+  if (!listed.value.has(key)) return   // not in the list: a GitHub link goes to GitHub, a local one nowhere
   event.preventDefault()
-  document.getElementById(`ready-issue-${link.number}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  flashed.value = link.number
+  document.getElementById(`ready-issue-${key}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  flashed.value = key
   setTimeout(() => {
-    if (flashed.value === link.number) flashed.value = null
+    if (flashed.value === key) flashed.value = null
   }, 1600)
 }
 </script>
@@ -45,7 +63,7 @@ function jump(link: IssueLink, event: MouseEvent): void {
   <section class="issues">
     <div class="head">
       <span class="label">Ready issues</span>
-      <span v-if="issues?.repo" class="repo">{{ issues.repo }}</span>
+      <span v-if="issues?.repo ?? issues?.tracker" class="repo">{{ issues.repo ?? issues.tracker }}</span>
       <button type="button" class="refresh" :disabled="issuesLoading" @click="refreshIssues">
         {{ issuesLoading ? 'reading…' : 'Refresh' }}
       </button>
@@ -57,19 +75,20 @@ function jump(link: IssueLink, event: MouseEvent): void {
       Issues aren't available: {{ issues.unavailable?.reason }}. {{ issues.unavailable?.fix }}
     </div>
     <div v-else-if="!issues.issues.length" class="dim">
-      No open issues labelled <code>{{ issues.ready_label }}</code>.
+      <template v-if="issues.repo">No open issues labelled <code>{{ issues.ready_label }}</code>.</template>
+      <template v-else>No issues under <code>.scratch/</code> with <code>Status: {{ issues.ready_label }}</code>.</template>
     </div>
 
     <ul v-else class="rows">
       <li
         v-for="issue in issues.issues"
-        :id="`ready-issue-${issue.number}`"
-        :key="issue.number"
+        :id="`ready-issue-${issueRef(issue)}`"
+        :key="issueRef(issue)"
         class="row"
-        :class="{ greyed: !runnable(issue) && !issue.rerun, flashed: flashed === issue.number }"
+        :class="{ greyed: !runnable(issue) && !issue.rerun, flashed: flashed === issueRef(issue) }"
       >
         <div class="line">
-          <a class="number" :href="issue.url" target="_blank" rel="noopener">#{{ issue.number }}</a>
+          <a class="number" :href="hrefOf(issue)" :title="issue.path ?? undefined" target="_blank" rel="noopener">{{ labelOf(issue) }}</a>
           <span class="title">{{ issue.title }}</span>
           <button
             v-if="issue.rerun"
@@ -98,16 +117,16 @@ function jump(link: IssueLink, event: MouseEvent): void {
 
         <div v-else-if="issue.verdict === 'blocked'" class="reason" :title="issue.why ?? ''">
           blocked by
-          <template v-for="(b, n) in issue.blocked_by" :key="b.number">
-            <a :href="b.url" target="_blank" rel="noopener" @click="jump(b, $event)">#{{ b.number }}</a>{{ n < issue.blocked_by.length - 1 ? ', ' : '' }}
+          <template v-for="(b, n) in issue.blocked_by" :key="refOf(b)">
+            <a :href="hrefOf(b)" :title="b.path ?? undefined" target="_blank" rel="noopener" @click="jump(b, $event)">{{ labelOf(b) }}</a>{{ n < issue.blocked_by.length - 1 ? ', ' : '' }}
           </template>
         </div>
 
         <div v-else-if="issue.verdict === 'spec'" class="reason" :title="issue.why ?? ''">
           a Spec —
           {{ issue.run_instead.length ? 'run its Tickets instead:' : 'none of its Tickets is Runnable yet:' }}
-          <template v-for="(t, n) in ticketsOf(issue)" :key="t.number">
-            <a :href="t.url" target="_blank" rel="noopener" @click="jump(t, $event)">#{{ t.number }}</a>{{ n < ticketsOf(issue).length - 1 ? ', ' : '' }}
+          <template v-for="(t, n) in ticketsOf(issue)" :key="refOf(t)">
+            <a :href="hrefOf(t)" :title="t.path ?? undefined" target="_blank" rel="noopener" @click="jump(t, $event)">{{ labelOf(t) }}</a>{{ n < ticketsOf(issue).length - 1 ? ', ' : '' }}
           </template>
         </div>
 

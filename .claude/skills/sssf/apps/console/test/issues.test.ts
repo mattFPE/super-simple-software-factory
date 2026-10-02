@@ -9,25 +9,31 @@
  * file goes and logs its Claim once `claim-hold` goes, so a test decides how
  * long its Launch is Starting and how long its Run goes unclaimed.
  *
+ * A Local Markdown repo (#17) runs the factory's real issues.py instead,
+ * against a fixture `.scratch/` tree: there is no GitHub to stub, and its
+ * listing must match the terminal's.
+ *
  *   bun test
  */
 import { Database } from "bun:sqlite";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AdwCatalog, IssueListing, Launch, LaunchPreview } from "../shared/types.ts";
 import { APP_DIR, onCleanup, port as nextPort, serve, tempDir, until } from "./support.ts";
 
 setDefaultTimeout(60_000);
 
-const TRACER = resolve(APP_DIR, "..", "..", "templates", "adws", "adw_modules", "tracer.py");
+const MODULES = resolve(APP_DIR, "..", "..", "templates", "adws", "adw_modules");
+const TRACER = join(MODULES, "tracer.py");
 const ISSUE_URL = "https://github.com/acme/widgets/issues";
 
 const OPTIONS = [
   { name: "prompt", flag: null, kind: "value", help: "what to do", default: null, choices: null, required: true },
   { name: "adw_id", flag: "--adw-id", kind: "value", help: null, default: null, choices: null, required: false },
   { name: "force", flag: "--force", kind: "flag", help: null, default: false, choices: null, required: false },
+  { name: "merge", flag: "--merge", kind: "flag", help: null, default: false, choices: null, required: false },
 ];
 
 function adw(doc: string, phases: string, description: object, body = ""): string {
@@ -62,7 +68,9 @@ with sqlite3.connect("adws/adw_data/sssf.db", timeout=10) as c:
     c.execute("INSERT INTO processes (adw_id, kind, name, pid, command, started_at) VALUES (?, 'adw', '', ?, ?, ?)",
               (adw_id, os.getpid(), " ".join(sys.argv), now))
 wait("claim-hold")
-url = "${ISSUE_URL}/" + next(a for a in sys.argv[1:] if a.startswith("#")).lstrip("#")
+# An issue goes first in the argv: "#4" logs its URL, a local issue its path.
+ref = sys.argv[1]
+url = "${ISSUE_URL}/" + ref.lstrip("#") if ref.startswith("#") else ref
 with sqlite3.connect("adws/adw_data/sssf.db", timeout=10) as c:
     c.execute("INSERT OR IGNORE INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)"
               " VALUES (?, ?, 2, 'claim', 'code', 'github', 'success', ?)", (adw_id + "_02_claim", adw_id, now))
@@ -139,17 +147,22 @@ function listCalls(r: Repo): number {
   return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean).length : 0;
 }
 
-/** A Run in the trace whose Claim phase logged this issue's URL, as issues.claim does. */
-function claimedRun(r: Repo, adwId: string, number: number, status: string, startedAt: string): void {
+/**
+ * A Run in the trace whose Claim phase logged this issue as issues.claim does:
+ * a GitHub issue by its URL, a local one (a path) by its path.
+ */
+function claimedRun(r: Repo, adwId: string, issue: number | string, status: string, startedAt: string): void {
+  const local = typeof issue === "string";
   const db = new Database(r.db);
   db.run("INSERT INTO sessions (adw_id, adw_name, request, status, started_at) VALUES (?, 'adw_full', ?, ?, ?)",
-    [adwId, `#${number}`, status, startedAt]);
+    [adwId, local ? issue : `#${issue}`, status, startedAt]);
   db.run("INSERT INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)" +
     " VALUES (?, ?, 2, 'claim', 'code', 'github', 'success', ?)", [`${adwId}_02_claim`, adwId, startedAt]);
   db.run("INSERT INTO events (event_id, adw_id, phase_id, type, name, payload_json, started_at)" +
     " VALUES (?, ?, ?, 'log', 'claim', ?, ?)",
     [`${adwId}_e1`, adwId, `${adwId}_02_claim`,
-      JSON.stringify({ issue: `${ISSUE_URL}/${number}`, label: "agent-running", checklist: "none" }), startedAt]);
+      JSON.stringify(local ? { issue, status: "agent-running", checklist: "none" }
+        : { issue: `${ISSUE_URL}/${issue}`, label: "agent-running", checklist: "none" }), startedAt]);
   db.close();
 }
 
@@ -283,7 +296,7 @@ describe("a Launch from an issue", () => {
     await startConsole(r);
     const first = await api<Launch>(r, "/api/launches", { adw: "adw_full", values: { prompt: "#4" } });
     expect(first.status).toBe(201);
-    expect(first.body.issue).toBe(4);
+    expect(first.body.issue).toBe("#4");
     expect(first.body.holds_issue).toBe(true);
     const heldBy = async (n: number) => (await issues(r)).body.issues.find((i) => i.number === n)!.held_by;
     const previewOf = (prompt: string) =>
@@ -437,5 +450,163 @@ describe("an issue whose latest Run failed", () => {
       { adw: "adw_full", values: { prompt: "#8" }, reruns: "fail0run" });
     expect(unseen.status).toBe(409);
     expect(unseen.body.error).toContain("review");
+  });
+});
+
+/** A local Ticket, as /to-tickets' local template writes one. */
+function ticket(number: number, title: string, status: string, blockedBy?: string): string {
+  return [`# ${String(number).padStart(2, "0")} — ${title}`, "", `**What to build:** ${title.toLowerCase()}.`, "",
+    ...(blockedBy ? [`**Blocked by:** ${blockedBy}`, ""] : []), `**Status:** ${status}`, "",
+    `- [ ] ${title} works`, ""].join("\n");
+}
+
+/** A local Spec. */
+function spec(title: string, status = "ready-for-agent"): string {
+  return `# ${title}\n\nStatus: ${status}\n\n## Problem Statement\n\nPeople need ${title.toLowerCase()}.\n`;
+}
+
+const WIDGETS = ".scratch/widgets";
+const PARTS = `${WIDGETS}/issues/01-make-the-parts.md`;
+const ASSEMBLE = `${WIDGETS}/issues/02-assemble-them.md`;
+const PAINT = `${WIDGETS}/issues/03-paint-it.md`;
+const BOLTS = ".scratch/gizmos/issues/01-tighten-the-bolts.md";   // a second feature's Ticket 01
+const GADGETS = ".scratch/gadgets/spec.md";                       // a Spec with no Tickets: its own Ticket
+
+/**
+ * A Local Markdown repo listed by the factory's real issues.py, not a stub:
+ * a Spec split into Tickets — one Runnable, one blocked by it, one claimed —
+ * a second feature numbering its Tickets from 01 too, and an unsplit Spec.
+ */
+function localRepo(): Repo {
+  const r = repo(null);
+  cpSync(MODULES, join(r.root, "adws", "adw_modules"), { recursive: true });
+  const write = (path: string, text: string) => {
+    mkdirSync(join(r.root, path, ".."), { recursive: true });
+    writeFileSync(join(r.root, path), text, "utf8");
+  };
+  write("docs/agents/issue-tracker.md", "# Issue tracker: Local Markdown\n\nIssues live under `.scratch/`.\n");
+  write(`${WIDGETS}/spec.md`, spec("Widgets"));
+  write(PARTS, ticket(1, "Make the parts", "ready-for-agent"));
+  write(ASSEMBLE, ticket(2, "Assemble them", "ready-for-agent", "01"));
+  write(PAINT, ticket(3, "Paint it", "agent-running"));
+  write(".scratch/gizmos/spec.md", spec("Gizmos", "needs-triage"));
+  write(BOLTS, ticket(1, "Tighten the bolts", "ready-for-agent"));
+  write(GADGETS, spec("Gadgets"));
+  return r;
+}
+
+/** What the terminal says: the same issues.py --list-ready --json the Console runs. */
+function fromTerminal(r: Repo): IssueListing {
+  const done = spawnSync("uv", ["run", "adws/adw_modules/issues.py", "--list-ready", "--json"],
+    { cwd: r.root, encoding: "utf8", env: { ...process.env, PYTHONUTF8: "1" } });
+  expect(done.status).toBe(0);
+  return JSON.parse(done.stdout) as IssueListing;
+}
+
+const byPath = (listed: IssueListing, path: string) => listed.issues.find((i) => i.path === path)!;
+
+describe("a Local Markdown repo's Ready issues", () => {
+  test("are listed with the verdicts and reasons the terminal gives, Runnable ones first", async () => {
+    const r = localRepo();
+    await startConsole(r);
+    const { status, body } = await issues(r);
+    expect(status).toBe(200);
+    expect(body.available).toBe(true);
+    expect(body.tracker).toBe("Local Markdown");
+    expect(body.issues.map((i) => [i.path, i.verdict])).toEqual([
+      [GADGETS, "runnable"], [BOLTS, "runnable"], [PARTS, "runnable"],
+      [ASSEMBLE, "blocked"], [PAINT, "claimed"], [`${WIDGETS}/spec.md`, "spec"],
+    ]);
+    const terminal = fromTerminal(r);
+    expect(terminal.issues.length).toBe(body.issues.length);
+    for (const issue of terminal.issues) {
+      const listed = byPath(body, issue.path!);
+      expect([listed.verdict, listed.why, listed.number, listed.url])
+        .toEqual([issue.verdict, issue.why, issue.number, issue.url]);
+    }
+    expect(byPath(body, GADGETS).number).toBeNull();
+    expect(byPath(body, ASSEMBLE).blocked_by.map((b) => b.path)).toEqual([PARTS]);
+    // A Spec links to its Tickets by path: two features can each have a Ticket 01.
+    expect(byPath(body, `${WIDGETS}/spec.md`).run_instead.map((t) => t.path)).toEqual([PARTS]);
+  });
+
+  test("link a claimed Ticket to the Run whose Claim logged its path", async () => {
+    const r = localRepo();
+    claimedRun(r, "pnt0run0", PAINT, "running", "2026-10-02T10:00:00+00:00");
+    await startConsole(r);
+    const { body } = await issues(r);
+    expect(byPath(body, PAINT).run).toEqual(
+      { adw_id: "pnt0run0", adw_name: "adw_full", status: "running", worktree: null, pr: null });
+    expect(byPath(body, PARTS).run).toBeNull();
+  });
+});
+
+describe("a Launch from a local Ticket", () => {
+  test("passes its path as the issue, landing with --merge, and holds that Ticket alone until its Claim lands", async () => {
+    const r = localRepo();
+    await startConsole(r);
+    await issues(r);   // as the Launch pane does on open
+    const pick = { adw: "adw_full", values: { prompt: PARTS, merge: true } };
+    const preview = await api<LaunchPreview>(r, "/api/launches/preview", pick);
+    expect(preview.status).toBe(200);
+    expect(preview.body.command).toBe(`uv run adws/adw_full.py ${PARTS} --merge --adw-id ${preview.body.adw_id}`);
+
+    const started = await api<Launch>(r, "/api/launches", { ...pick, adw_id: preview.body.adw_id });
+    expect(started.status).toBe(201);
+    expect(started.body.issue).toBe(PARTS);
+    expect(started.body.holds_issue).toBe(true);
+    const listed = (await issues(r)).body;
+    expect(byPath(listed, PARTS).held_by).toBe(started.body.adw_id);
+    expect(byPath(listed, BOLTS).held_by).toBeNull();   // the other Ticket 01
+
+    const previewOf = (prompt: string) =>
+      api<{ error: string }>(r, "/api/launches/preview", { adw: "adw_short", values: { prompt } });
+    for (const prompt of [PARTS, `./${PARTS}`, PARTS.replaceAll("/", "\\")]) {
+      const again = await previewOf(prompt);
+      expect(again.status).toBe(409);
+      expect(again.body.error).toContain(PARTS);
+    }
+    expect((await previewOf(BOLTS)).status).toBe(200);
+
+    for (const hold of ["hold", "claim-hold"]) rmSync(join(r.root, hold), { force: true });
+    expect(await until(async () => byPath((await issues(r)).body, PARTS).held_by === null, 30)).toBe(true);
+  });
+
+  test("is one even before the Console has listed the issues, while a GitHub repo's same path is a request file", async () => {
+    const r = localRepo();
+    await startConsole(r);
+    const first = await api<Launch>(r, "/api/launches", { adw: "adw_full", values: { prompt: PARTS } });
+    expect(first.status).toBe(201);
+    expect(first.body.argv.slice(3)).toEqual([PARTS, "--adw-id", first.body.adw_id]);
+    expect(first.body.holds_issue).toBe(true);
+
+    const github = repo();
+    await startConsole(github);
+    const plain = await api<Launch>(github, "/api/launches", { adw: "adw_full", values: { prompt: PARTS } });
+    expect(plain.status).toBe(201);
+    expect(plain.body.issue).toBeNull();
+    expect(plain.body.argv.slice(3)).toEqual(["--adw-id", plain.body.adw_id, "--", PARTS]);
+  });
+});
+
+describe("a local Ticket whose latest Run failed", () => {
+  test("with its worktree kept offers Rerun, running its outcome comment's command under the same adw_id", async () => {
+    const r = localRepo();
+    claimedRun(r, "fail0run", PARTS, "fail", "2026-10-01T10:00:00+00:00");
+    worktreeOf(r, "fail0run");
+    await startConsole(r);
+    const parts = byPath((await issues(r)).body, PARTS);
+    expect(parts.verdict).toBe("runnable");
+    expect(parts.rerun).toEqual({ adw: "adw_full", adw_id: "fail0run", force: false, pr: null });
+
+    const rerun = { adw: "adw_full", values: { prompt: PARTS }, reruns: "fail0run" };
+    const preview = await api<LaunchPreview>(r, "/api/launches/preview", rerun);
+    expect(preview.status).toBe(200);
+    // issues._outcome's `uv run adws/adw_full.py "<path>" --adw-id fail0run`, as a shell splits it.
+    expect(preview.body.argv).toEqual(["uv", "run", "adws/adw_full.py", PARTS, "--adw-id", "fail0run"]);
+    const started = await api<Launch>(r, "/api/launches", rerun);
+    expect(started.status).toBe(201);
+    expect(started.body.rerun).toBe(true);
+    expect(started.body.holds_issue).toBe(true);
   });
 });
