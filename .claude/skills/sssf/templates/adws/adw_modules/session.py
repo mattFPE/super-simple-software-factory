@@ -164,7 +164,8 @@ def add_cli_args(parser, commits: bool = False, resumes: bool = False) -> None:
     land = parser.add_mutually_exclusive_group()
     land.add_argument("--branch", action="store_true",
                       help="after the commit, leave the run's branch for you to take "
-                           "(the default, except for an issue, which defaults to --pr)")
+                           "(the default, except for an issue: a GitHub one defaults to --pr, "
+                           "a local one to --merge)")
     land.add_argument("--merge", action="store_true",
                       help="after the commit, merge the run's branch into the one you started from")
     land.add_argument("--pr", action="store_true",
@@ -188,9 +189,10 @@ def cli_options(args) -> RunOptions:
         land=("merge" if getattr(args, "merge", False)
               else "pr" if getattr(args, "pr", False)
               else "branch" if getattr(args, "branch", False)
-              # A GitHub issue ends where it can be closed: a PR. In place there
-              # is no branch of the run's own to open one from.
-              else "pr" if issue and not issue.path and commits and not in_place
+              # An issue ends where it is settled: a GitHub one as a PR that
+              # closes it, a local one merged, Resolved with its code. In place
+              # the commit is already on your branch.
+              else ("merge" if issue.path else "pr") if issue and commits and not in_place
               else "branch"))
     if opts.allow_dirty and not opts.in_place:
         raise SystemExit("--allow-dirty only applies with --in-place: a worktree run starts "

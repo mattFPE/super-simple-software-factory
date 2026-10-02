@@ -74,7 +74,9 @@ def require_committable(allow_dirty: bool = False, repo: Repo = None) -> None:
             "a first commit before running it.")
     if allow_dirty:
         return
-    dirty = _git("status", "--porcelain", repo=repo).splitlines()
+    # A Local Markdown Tracker's Claims are uncommitted on purpose, and commit_all
+    # leaves them out, so a pending one is never the engineer's work at risk.
+    dirty = _git("status", "--porcelain", "--", *_code(), repo=repo).splitlines()
     if dirty:
         listing = "\n".join(f"  {line}" for line in dirty[:20])
         more = f"\n  … and {len(dirty) - 20} more" if len(dirty) > 20 else ""
@@ -86,16 +88,28 @@ def require_committable(allow_dirty: bool = False, repo: Repo = None) -> None:
 
 
 def commit_all(message: str, repo: Repo = None) -> str:
-    """Stage the working tree and commit it. Returns the new short sha."""
+    """Stage the working tree and commit it. Returns the new short sha.
+
+    All of it but a Local Markdown Tracker (`.scratch/`): a Ticket's Claim is
+    the engineer's checkout's state, never part of the agents' code (ADR 0002).
+    """
     if not is_repo(repo):
         raise RuntimeError(
             "not a git repository — a commit phase needs one. Run `git init` in the "
             "repo root (and make a first commit) before running an ADW that commits.")
-    _git("add", "-A", repo=repo)
-    if not _git("status", "--porcelain", repo=repo):
+    code = _code()
+    _git("add", "-A", "--", *code, repo=repo)
+    if _ok("diff", "--cached", "--quiet", "--", *code, repo=repo):
         raise RuntimeError("nothing to commit — the preceding phases changed no files")
-    _git("commit", "-m", message, repo=repo)
+    # A pathspec makes this `--only`: a Tracker file staged by hand stays uncommitted.
+    _git("commit", "-m", message, "--", *code, repo=repo)
     return _git("rev-parse", "--short", "HEAD", repo=repo)
+
+
+def _code() -> list[str]:
+    """A pathspec for the whole tree but the repo's Tracker, if it keeps one inside."""
+    from . import issues                  # here: issues imports this module
+    return [":/", *(f":(top,exclude){path}" for path in issues.tracker_paths())]
 
 
 def commit_paths(message: str, paths: list[str], repo: Repo = None) -> str | None:
@@ -160,7 +174,9 @@ def merge_base(ref: str, other: str = "HEAD", repo: Repo = None) -> str:
 
 
 def is_dirty(repo: Repo = None) -> bool:
-    return bool(_git("status", "--porcelain", repo=repo))
+    """Whether the code has uncommitted changes: a pending Claim in a Local
+    Markdown Tracker is not the code (see require_committable)."""
+    return bool(_git("status", "--porcelain", "--", *_code(), repo=repo))
 
 
 def untracked_files(repo: Repo = None) -> list[str]:

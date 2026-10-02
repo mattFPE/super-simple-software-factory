@@ -35,6 +35,14 @@ removes the label and comments with the outcome. Done needs no label of its
 own: the PR says `Closes #42`, so merging it closes the issue. A failed run
 leaves the ready label where it was, so a rerun is just a rerun.
 
+A local issue is claimed and settled in the engineer's checkout, uncommitted
+(ADR 0002): `Status: agent-running`, then back to the ready Status with the
+outcome under `## Comments`. It is Resolved by `Status: resolved`, which travels
+with the code: a merging run commits it on its own branch before merging. A
+run that leaves its branch for review sets `ready-for-human` instead, so the
+Ticket's dependents wait for the code. `.scratch/` is the Tracker there, so no
+agent may edit it, no code commit carries it, and no clean-tree check counts it.
+
 Everything on GitHub goes through `gh api` against origin's repository, never
 gh's default, which in a fork is the parent (see git_helper.origin_repo).
 
@@ -54,6 +62,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import NamedTuple
@@ -70,11 +79,13 @@ from .data_types import Issue, IssueLink, PhaseParams, RunOptions
 from .utils import operator_env
 
 RUNNING_LABEL = "agent-running"
-READY_ROLE = "ready-for-agent"             # the role's canonical name in mattpocock/skills
+READY_ROLE = "ready-for-agent"             # the roles' canonical names in mattpocock/skills
+HUMAN_ROLE = "ready-for-human"
 TRIAGE_LABELS = Path("docs") / "agents" / "triage-labels.md"   # /setup-matt-pocock-skills
 TRACKER_FILE = Path("docs") / "agents" / "issue-tracker.md"     # /setup-matt-pocock-skills
 GITHUB, LOCAL = "GitHub", "Local Markdown"   # the Trackers sssf reads, as that file's heading names them
 RESOLVED = "resolved"                      # the only local Status that clears a blocker
+SCRATCH = ".scratch/"                      # a Local Markdown repo's Tracker
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}                   # whose comments reach an agent
 MARKER = "<!-- sssf -->"                   # on our own comments, so they are never fed back in
 CHECKLIST_HEADING = "Review checklist"     # what gates.checklist_covered reads back
@@ -88,6 +99,7 @@ _URL = re.compile(r"^https?://([^/\s]+)/([^/\s]+)/([^/\s]+)/issues/(\d+)/?(?:[?#
 _HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _LOCAL_PATH = re.compile(r"^\.scratch/[^/]+/(?:spec\.md|issues/\d+-[^/]*\.md)$")
 _TICKET_FILE = re.compile(r"^(\d+)-.*\.md$")
+_STATUS = re.compile(r"^(\s*\**\s*Status\s*\**\s*:\s*\**\s*[`*]*)(.*?)([`*]*\s*)$", re.I)
 _BREAK = re.compile(r"^ {0,3}([-*_])(?:\s*\1){2,}\s*$")   # a thematic break: ---, ***, ___
 _ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$")
 _CLOSING_PRS = ("query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name)"
@@ -240,15 +252,30 @@ def _verdict_fields(repo: str, raw: dict, body: str) -> dict:
 
 
 def ready_label() -> str:
-    """This repo's label for the ready-for-agent role, from the triage-labels.md
-    table /setup-matt-pocock-skills writes; the role's own name without one."""
+    """This repo's label for the ready-for-agent role."""
+    return _triage_label(READY_ROLE)
+
+
+def _triage_label(role: str) -> str:
+    """This repo's label for a triage role, from the triage-labels.md table
+    /setup-matt-pocock-skills writes; the role's own name without one."""
     path = git_helper.repo_root() / TRIAGE_LABELS
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             cells = [cell.strip().strip("`").strip() for cell in line.strip().strip("|").split("|")]
-            if len(cells) >= 2 and cells[0] == READY_ROLE and cells[1]:
+            if len(cells) >= 2 and cells[0] == role and cells[1]:
                 return cells[1]
-    return READY_ROLE
+    return role
+
+
+def tracker_paths() -> list[str]:
+    """Where this repo's Tracker lives inside it: `.scratch/` in a Local Markdown
+    repo, else nothing. No agent may edit it, no code commit carries it, and no
+    clean-tree check counts it (ADR 0002)."""
+    try:
+        return [SCRATCH] if tracker() == LOCAL else []
+    except Unavailable:
+        return []
 
 
 def _parent(repo: str, number: int, body: str) -> dict | None:
@@ -393,10 +420,9 @@ def _local_doc(file: Path) -> LocalDoc:
                     blocked_by=[entry for entry in blocked if entry.strip() and not _is_none(entry)])
 
 
-def _split_comments(text: str) -> tuple[str, list[str]]:
-    """The file without its `## Comments` section, and that section's comments."""
-    lines = text.splitlines()
-    level, fenced, start, end = None, False, None, len(lines)
+def _comments_span(lines: list[str]) -> tuple[int, int] | None:
+    """The `## Comments` heading's line, and the line its section ends before."""
+    level, fenced, start = None, False, None
     for i, line in enumerate(lines):
         if line.lstrip().startswith(("```", "~~~")):
             fenced = not fenced
@@ -406,10 +432,17 @@ def _split_comments(text: str) -> tuple[str, list[str]]:
         if level is None and _title_key(match.group(2)) == "comments":
             level, start = len(match.group(1)), i
         elif level is not None and len(match.group(1)) <= level:
-            end = i
-            break
-    if start is None:
+            return start, i
+    return None if start is None else (start, len(lines))
+
+
+def _split_comments(text: str) -> tuple[str, list[str]]:
+    """The file without its `## Comments` section, and that section's comments."""
+    lines = text.splitlines()
+    span = _comments_span(lines)
+    if span is None:
         return text, []
+    start, end = span
     comments, current, fenced = [], [], False
     for line in lines[start + 1:end]:
         if line.lstrip().startswith(("```", "~~~")):
@@ -502,6 +535,47 @@ def _local_blockers(root: Path, folder: Path, entries: list[str], label: str) ->
 
 def _ref_text(text: str) -> str:
     return text.strip().strip("*`._ ").strip()
+
+
+def _settled_text(text: str, status: str, comment: str | None = None) -> str:
+    """A local issue file's text with its first `Status:` line set to `status`,
+    and `comment` appended under `## Comments` (made at the end if missing)."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines, fenced = text.splitlines(), False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        if not fenced and (match := _STATUS.match(line)):
+            lines[i] = match.group(1) + status + match.group(3)
+            break
+    if comment:
+        span = _comments_span(lines)
+        if span is None:
+            lines = _trimmed(lines) + ["", "## Comments", "", comment]
+        else:
+            start, end = span
+            section = _trimmed(lines[start + 1:end])
+            rule = ["", "---"] if any(line.strip() for line in section) else []
+            rest = ["", *lines[end:]] if end < len(lines) else []
+            lines = lines[:start + 1] + section + rule + ["", comment] + rest
+    return newline.join(lines) + newline
+
+
+def _trimmed(lines: list[str]) -> list[str]:
+    """`lines` without its trailing blank ones."""
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    return lines[:end]
+
+
+def _settle(file: Path, status: str, comment: str | None = None, into: Path | None = None) -> None:
+    """Write `file` settled (see _settled_text) back over itself, or into `into`,
+    keeping its own line endings."""
+    with file.open(encoding="utf-8", newline="") as f:
+        text = _settled_text(f.read(), status, comment)
+    with (into or file).open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 
 # ── may it run ───────────────────────────────────────────────────────────────
@@ -685,11 +759,12 @@ def checklist_in(prompt: str) -> list[str]:
 def claim(run, opts: RunOptions) -> None:
     """The `claim` phase: mark the issue as worked on; settle it when the run settles.
 
-    Call right after the request phase. A request that is not an issue does nothing,
-    and nor, yet, does a local issue: its Run reads it but leaves its Status alone.
+    Call right after the request phase. A request that is not an issue does nothing.
     """
-    if not opts.issue or opts.issue.path:
+    if not opts.issue:
         return
+    if opts.issue.path:
+        return _claim_local(run, opts)
     issue = opts.issue
     with run.phase(PhaseParams(
             name="claim", kind="code", owner="github",
@@ -712,6 +787,75 @@ def _release(run, opts: RunOptions, ok: bool) -> None:
     run.console.note(f"#{issue.number}: {RUNNING_LABEL} removed, outcome commented")
 
 
+def _claim_local(run, opts: RunOptions) -> None:
+    """A local issue's Claim: in the engineer's checkout, never committed."""
+    issue = opts.issue
+    with run.phase(PhaseParams(
+            name="claim", kind="code", owner="tracker",
+            description=f"Set {issue.path} to Status: {RUNNING_LABEL} in your checkout so no "
+                        "second run takes it, and settle it there when this one ends")) as ph:
+        _settle(run.main_root / issue.path, RUNNING_LABEL)
+        run.when_settled(lambda ok: _release_local(run, opts, ok))
+        ph.log(issue=issue.url, status=RUNNING_LABEL,
+               checklist=(f"{len(issue.checklist)} item(s) from {issue.checklist_source}"
+                          if issue.checklist else "none — the review reads the whole issue"))
+
+
+def _release_local(run, opts: RunOptions, ok: bool) -> None:
+    """Settle a local Claim, in the checkout. A merged run resolved it on its branch."""
+    issue = opts.issue
+    if ok and run.landed.get("merged_into"):
+        run.console.note(f"{issue.path}: Status: {RESOLVED}, merged with the code")
+        return
+    # In place, the code is already on your branch: Resolved, left for you to
+    # commit (ADR 0002 makes no Tracker commit on your branch). Accepted but not
+    # on your branch (--branch, --pr): yours to review, and its dependents stay
+    # blocked until it is Resolved.
+    status = (issue.ready_label if not ok else RESOLVED if opts.in_place
+              else _triage_label(HUMAN_ROLE))
+    _settle(run.main_root / issue.path, status, _outcome(run, opts, ok))
+    run.console.note(f"{issue.path}: Status: {status}, outcome commented (uncommitted)")
+
+
+def resolve_on_branch(run, opts: RunOptions) -> bool:
+    """Commit a local issue's `Status: resolved` and outcome on the run's own branch.
+
+    A merging land calls it before it merges, so the code and the Ticket's
+    resolution reach the engineer's branch in one merge, and a dependent can
+    never unblock ahead of the code it needs. What is resolved is the checkout's
+    copy — the Claim, and any edits of the engineer's — so the merge loses nothing.
+    Whether it committed: a GitHub issue, or none, has nothing to resolve here.
+    """
+    issue = opts.issue
+    if not issue or not issue.path:
+        return False
+    _settle(run.main_root / issue.path, RESOLVED, _outcome(run, opts, True),
+            into=Path(run.repo_root) / issue.path)
+    return bool(git_helper.commit_paths(f"Resolve {issue.path}", [issue.path], run.repo_root))
+
+
+@contextmanager
+def claim_set_aside(run, opts: RunOptions):
+    """Run the block with a local issue's Claim taken out of the checkout.
+
+    A merge refuses to overwrite an uncommitted change, and the Claim is one, to
+    the very file the run's branch resolves. Put back if the block fails, so the
+    run's settle finds it and restores the ready Status.
+    """
+    issue = opts.issue
+    if not issue or not issue.path:
+        yield
+        return
+    file = run.main_root / issue.path
+    claimed = file.read_bytes()
+    git_helper._git("checkout", "HEAD", "--", issue.path, repo=run.main_root)
+    try:
+        yield
+    except BaseException:
+        file.write_bytes(claimed)
+        raise
+
+
 def _unclaim(repo: str, number: int, comment: str) -> None:
     path = f"repos/{_slug(repo)}/issues/{number}"
     _api_optional(f"{path}/labels/{RUNNING_LABEL}", repo, method="DELETE")
@@ -725,16 +869,24 @@ def release_killed(issue_url: str, adw_id: str, adw: str) -> None:
     report, its spend): it was stopped, the ready label is still on, and how
     to rerun — picking its kept worktree back up when it has one.
     """
-    repo, number = parse_ref(issue_url)
-    kept = worktree.path_for(git_helper.repo_root(), adw_id).is_dir()
+    root = git_helper.repo_root()
+    github = parse_ref(issue_url)         # None: a local issue's claim logs its path
+    ref = f"#{github[1]}" if github else issue_url
+    kept = worktree.path_for(root, adw_id).is_dir()
     rerun = (f"Its worktree is kept, and rerunning picks it back up:\n"
-             f"`uv run adws/{adw}.py \"#{number}\" --adw-id {adw_id}`" if kept
-             else f"Rerun it with:\n`uv run adws/{adw}.py \"#{number}\"`")
-    _unclaim(repo, number, "\n\n".join([
+             f"`uv run adws/{adw}.py \"{ref}\" --adw-id {adw_id}`" if kept
+             else f"Rerun it with:\n`uv run adws/{adw}.py \"{ref}\"`")
+    still = (f"`{ready_label()}` is still on the issue." if github
+             else f"`Status: {ready_label()}` is restored.")
+    comment = "\n\n".join([
         MARKER,
         f"⏹️ **SSSF run `{adw_id}`** (`{adw}`) was stopped, and killed before it could "
         "report back.",
-        f"`{ready_label()}` is still on the issue. {rerun}"]))
+        f"{still} {rerun}"])
+    if github:
+        _unclaim(*github, comment)
+    else:
+        _settle(root / issue_url, ready_label(), comment)
 
 
 def _outcome(run, opts: RunOptions, ok: bool) -> str:
@@ -754,21 +906,29 @@ def _outcome(run, opts: RunOptions, ok: bool) -> str:
     else:
         lines = [f"❌ {who} finished, but its work was not accepted: "
                  f"{run.not_accepted or 'the acceptance criterion was not met'}."]
+    issue = opts.issue
     if run.landed.get("pr"):
         lines.append(f"Pull request: {run.landed['pr']}")
     elif run.landed.get("branch"):
         lines.append(f"Branch: `{run.landed['branch']}`")
+    elif ok and opts.land == "merge" and run.worktree:    # resolve_on_branch, before landing
+        lines.append(f"Lands by merging `{run.worktree['branch']}` "
+                     f"into `{run.worktree['base_branch']}`.")
     lines += run.report.values()
+    if ok and issue.path and not opts.in_place and opts.land != "merge":
+        lines.append(f"`Status: {_triage_label(HUMAN_ROLE)}`: review the work and merge it, "
+                     f"then set `Status: {RESOLVED}`.")
+    still = (f"`Status: {issue.ready_label}` is restored." if issue.path
+             else f"`{issue.ready_label}` is still on the issue.")
     if not ok and run.landed.get("pr"):
         # Failed after landing (its CI went red): the worktree is gone and the
         # open PR makes require_runnable refuse a plain rerun.
-        lines.append(f"`{opts.issue.ready_label}` is still on the issue. Fix the pull request, "
-                     "or close it and start a fresh run:\n"
-                     f"`uv run adws/{adw}.py \"#{opts.issue.number}\" --force`")
+        lines.append(f"{still} Fix the pull request, or close it and start a fresh run:\n"
+                     f"`uv run adws/{adw}.py \"{issue.ref}\" --force`")
     elif not ok:
         kept = " Its worktree is kept, and rerunning picks it back up:" if run.worktree else ""
-        lines.append(f"`{opts.issue.ready_label}` is still on the issue.{kept}\n"
-                     f"`uv run adws/{adw}.py \"#{opts.issue.number}\" --adw-id {run.adw_id}`")
+        lines.append(f"{still}{kept}\n"
+                     f"`uv run adws/{adw}.py \"{issue.ref}\" --adw-id {run.adw_id}`")
     lines.append(f"{run.tokens:,} tokens · ${run.cost:.2f}")
     return "\n\n".join([MARKER, *lines])
 

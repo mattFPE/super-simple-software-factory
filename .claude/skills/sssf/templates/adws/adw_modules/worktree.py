@@ -25,7 +25,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import ci, git_helper
+from . import ci, git_helper, issues
 from .data_types import PhaseParams, RunOptions
 from .utils import operator_env
 
@@ -157,21 +157,27 @@ def _land(run, opts: RunOptions) -> dict:
     mode = opts.land
     wt = run.worktree
     main_root = run.main_root
-    head = git_helper.short_sha("HEAD", wt["path"])
-    ahead = int(git_helper._git("rev-list", "--count", f"{wt['base_sha']}..HEAD",
-                                repo=wt["path"]))
-    outcome = {"branch": wt["branch"], "head": head, "commits": ahead, "land": mode}
-    if ahead == 0:
-        outcome["note"] = "no commits on the branch — nothing to land"
-    elif mode == "merge":
+    if mode == "merge":
         current = git_helper.current_branch(main_root)
         if current != wt["base_branch"]:
             raise RuntimeError(
                 f"your checkout is on {current!r}, but the run started from "
                 f"{wt['base_branch']!r} — merge by hand: git merge {wt['branch']}")
+    ahead = int(git_helper._git("rev-list", "--count", f"{wt['base_sha']}..HEAD",
+                                repo=wt["path"]))
+    if mode == "merge" and ahead:
+        # A local Ticket's resolution travels with the code it needs (ADR 0002).
+        if issues.resolve_on_branch(run, opts):
+            ahead += 1
+    head = git_helper.short_sha("HEAD", wt["path"])
+    outcome = {"branch": wt["branch"], "head": head, "commits": ahead, "land": mode}
+    if ahead == 0:
+        outcome["note"] = "no commits on the branch — nothing to land"
+    elif mode == "merge":
         # Refuses on its own if your uncommitted edits touch the same files;
-        # the branch is untouched either way.
-        git_helper._git("merge", "--no-edit", wt["branch"], repo=main_root)
+        # the branch is untouched either way. The run's own Claim is set aside.
+        with issues.claim_set_aside(run, opts):
+            git_helper._git("merge", "--no-edit", wt["branch"], repo=main_root)
         outcome["merged_into"] = wt["base_branch"]   # branch deleted once the worktree is gone
     elif mode == "pr":
         # An issue names the work better than the last commit does, which in a

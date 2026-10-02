@@ -36,7 +36,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import skills
+from . import issues, skills
 from .data_types import AgentConfig, SSSFConfig
 
 # Protected in every roster; `defaults.protected_files` adds to these, never
@@ -147,10 +147,12 @@ def protected(cfg: SSSFConfig) -> list[str]:
     The built-ins, the roster's own additions, every skill it names inside the
     repo, and `data_dir` itself outside the session runtime: its prompts and
     harness extensions are what agents are told, and a builder that could
-    edit the reviewer's system.md could edit its own grading.
+    edit the reviewer's system.md could edit its own grading. And a Local
+    Markdown Tracker, `.scratch/`: an agent that could edit its Ticket could
+    tick its own acceptance boxes, or mark itself Resolved.
     """
     paths = [*BUILTIN_PROTECTED, *cfg.defaults.protected_files, *skills.protected(cfg),
-             _data_dir(cfg)]
+             _data_dir(cfg), *issues.tracker_paths()]
     return list(dict.fromkeys(paths))
 
 
