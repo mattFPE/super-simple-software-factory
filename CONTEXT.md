@@ -58,11 +58,11 @@ The local web UI where an engineer launches, watches and stops Runs in one targe
 _Avoid_: control plane, dashboard, launcher
 
 **Launch**:
-The Console starting an ADW process for a new Run, with an `adw_id` the Console chose. A Launch exists before its Run has any trace.
+The Console starting an ADW process for a new Run, with an `adw_id` the Console chose. A Launch exists before its Run has any trace. A Resuming ADW's Launch instead continues a settled Run under that Run's own `adw_id`.
 
 **Starting**:
-A Launch whose process is alive but whose Run has not yet appeared in the trace.
+A Launch whose process is alive but whose Run has not yet appeared in the trace — or, continuing a Run, whose process has not yet joined that Run's trace.
 
 **Refused**:
-A Launch whose process exited before its Run ever appeared in the trace — the ADW turned the request down (bad config, unrunnable issue, dirty tree).
+A Launch whose process exited before its Run ever appeared in the trace (or, continuing a Run, before joining it) — the ADW turned the request down (bad config, unrunnable issue, dirty tree).
 _Avoid_: failed (a failed Run has a trace; a Refused Launch has none)

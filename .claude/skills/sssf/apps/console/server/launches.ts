@@ -10,6 +10,10 @@
  * dir, the one thing the Console writes for a Launch; the trace is the ADW's
  * own tracer's to write (ADR 0001).
  *
+ * A Resuming ADW is launched only to continue a settled Run, under that Run's
+ * adw_id, and its Launch is Starting until its own process joins that Run's
+ * trace.
+ *
  * Launches live in memory only. After a restart a Run is still found through
  * its session row; one that never wrote a row is simply forgotten.
  */
@@ -20,8 +24,15 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
-  AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest,
+  AdwCatalog, AdwDescription, AdwInfo, AdwOption, Launch, LaunchPreview, LaunchRequest, Session,
 } from "../shared/types.ts";
+
+/** What Launches read back from the trace, which only the ADWs write (ADR 0001). */
+export interface Trace {
+  session(adwId: string): Pick<Session, "status"> | null;
+  /** ADW processes recorded under a Run: one more means a Resuming ADW has joined it. */
+  adwProcessCount(adwId: string): number;
+}
 
 /** An error the route turns into this HTTP status rather than a 500. */
 export class HttpError extends Error {
@@ -151,13 +162,17 @@ function argsFor(info: AdwInfo, description: AdwDescription, values: LaunchReque
   return positionals.length ? [...args, "--", ...positionals] : args;
 }
 
-/** The last lines of a log, read from its end so a long Run's output costs nothing. */
-function tailOf(path: string): string {
+/**
+ * The last lines of a log from byte `from` on, read from its end so a long
+ * Run's output costs nothing. A continuing Launch appends to its Run's log, so
+ * its tail starts where it began.
+ */
+function tailOf(path: string, from: number): string {
   if (!existsSync(path)) return "";
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
-    const length = Math.min(size, TAIL_BYTES);
+    const length = Math.max(0, Math.min(size - from, TAIL_BYTES));
     const buffer = Buffer.alloc(length);
     readSync(fd, buffer, 0, length, size - length);
     return buffer.toString("utf8").replace(/\s+$/, "").split(/\r?\n/).slice(-TAIL_LINES).join("\n");
@@ -170,6 +185,10 @@ function tailOf(path: string): string {
 interface Tracked {
   launch: Omit<Launch, "state" | "log_tail">;
   exited: boolean;
+  /** Where this Launch's output begins in the log. */
+  logFrom: number;
+  /** For a continuing Launch, the Run's ADW process count when it began; null for a fresh one. */
+  processesBefore: number | null;
 }
 
 export class Launches {
@@ -182,8 +201,7 @@ export class Launches {
   constructor(
     readonly repoRoot: string,
     private readonly sessionsDir: string,
-    /** Whether the trace has a session row for this id: the moment a Launch becomes a Run. */
-    private readonly hasRun: (adwId: string) => boolean,
+    private readonly trace: Trace,
   ) {}
 
   async catalog(): Promise<AdwCatalog> {
@@ -226,6 +244,13 @@ export class Launches {
     if (typeof req?.adw !== "string" || typeof req.values !== "object" || req.values === null) {
       throw new HttpError(400, "a launch needs an adw and its values");
     }
+    const continues = req.continues;
+    if (continues !== undefined) {
+      if (typeof continues !== "string" || !ADW_ID.test(continues)) throw new HttpError(400, "invalid continues");
+      if (req.adw_id !== undefined) {
+        throw new HttpError(400, "a continuing Launch runs under the Run's own adw_id: send continues alone");
+      }
+    }
     const catalog = await this.catalog();
     if (catalog.read_only) {
       throw new HttpError(409, "this repo's ADWs predate --describe: run `just sssf-update` to launch from the Console");
@@ -233,37 +258,57 @@ export class Launches {
     const info = catalog.adws.find((a) => a.name === req.adw);
     if (!info) throw new HttpError(404, `no ADW ${req.adw} in adws/`);
     if (!info.description) throw new HttpError(409, `${info.name} can't describe itself: ${info.error}`);
-    if (info.description.resumes) {
+    if (info.description.resumes && continues === undefined) {
       throw new HttpError(400, `${info.name} is a Resuming ADW: it continues an earlier Run, so it can't start a fresh one`);
     }
+    if (!info.description.resumes && continues !== undefined) {
+      throw new HttpError(400, `${info.name} isn't a Resuming ADW: it starts a fresh Run, so it can't continue ${continues}`);
+    }
 
-    const adwId = req.adw_id ?? randomBytes(4).toString("hex");
+    const adwId = continues ?? req.adw_id ?? randomBytes(4).toString("hex");
     if (!ADW_ID.test(adwId)) throw new HttpError(400, "invalid adw_id");
-    if (this.entries.has(adwId) || this.hasRun(adwId)) throw new HttpError(409, `${adwId} is already a Run`);
+    if (continues !== undefined) {
+      const run = this.trace.session(continues);
+      if (!run) throw new HttpError(404, `no Run ${continues} to continue`);
+      const entry = this.entries.get(continues);
+      if (run.status === "running" || (entry && !entry.exited)) {
+        throw new HttpError(409, `${continues} is still running: continue it once it has settled`);
+      }
+    } else if (this.entries.has(adwId) || this.trace.session(adwId)) {
+      throw new HttpError(409, `${adwId} is already a Run`);
+    }
     const argv = ["uv", "run", info.file, ...argsFor(info, info.description, req.values, adwId)];
     return { adw_id: adwId, argv, command: argv.map(shellQuote).join(" ") };
   }
 
   /**
-   * Spawn the ADW. With the id a preview minted, only that preview's exact argv
-   * runs: a form edited after its review is turned down, not launched unseen.
+   * Spawn the ADW. With the id a preview minted, or the Run it continues, only
+   * that preview's exact argv runs: a form edited after its review is turned
+   * down, not launched unseen.
    */
   async start(req: LaunchRequest): Promise<Launch> {
     const preview = await this.plan(req);
-    if (req.adw_id !== undefined) {
-      const shown = this.previewed.get(req.adw_id);
+    const continuing = req.continues !== undefined;
+    if (req.adw_id !== undefined || continuing) {
+      const shown = this.previewed.get(preview.adw_id);
       if (!shown || shown.join("\0") !== preview.argv.join("\0")) {
         throw new HttpError(409, "this isn't the command you reviewed: review the new one before launching it");
       }
-      this.previewed.delete(req.adw_id);
+      this.previewed.delete(preview.adw_id);
     }
     mkdirSync(join(this.sessionsDir, preview.adw_id), { recursive: true });
     const logPath = this.logFile(preview.adw_id);
+    // The Run's earlier output stays above; the full log says where this Launch begins.
+    if (continuing) appendFileSync(logPath, `\n[console] continuing with ${preview.command}\n`, "utf8");
     const fd = openSync(logPath, "a");
     const entry: Tracked = {
-      launch: { ...preview, adw: req.adw, started_at: new Date().toISOString(), exit_code: null },
+      launch: { ...preview, adw: req.adw, continuing, started_at: new Date().toISOString(), exit_code: null },
       exited: false,
+      logFrom: fstatSync(fd).size,
+      processesBefore: continuing ? this.trace.adwProcessCount(preview.adw_id) : null,
     };
+    // Re-inserted, so a continued Run's Launch lists as the newest.
+    this.entries.delete(preview.adw_id);
     this.entries.set(preview.adw_id, entry);
     try {
       // Detached, output to the log, handle released: the Run outlives this server.
@@ -305,9 +350,12 @@ export class Launches {
 
   private view(entry: Tracked): Launch {
     const { adw_id } = entry.launch;
-    // The row is checked first: an ADW that wrote one and then exited is a Run, not a refusal.
-    const state = this.hasRun(adw_id) ? "started" : entry.exited ? "refused" : "starting";
+    // The trace is checked first: an ADW that joined it and then exited is a Run, not a refusal.
+    const joined = entry.processesBefore === null
+      ? this.trace.session(adw_id) !== null
+      : this.trace.adwProcessCount(adw_id) > entry.processesBefore;
+    const state = joined ? "started" : entry.exited ? "refused" : "starting";
     const path = this.logPath(adw_id);
-    return { ...entry.launch, state, log_tail: state === "started" || !path ? "" : tailOf(path) };
+    return { ...entry.launch, state, log_tail: state === "started" || !path ? "" : tailOf(path, entry.logFrom) };
   }
 }

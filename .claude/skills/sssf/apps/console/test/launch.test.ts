@@ -104,7 +104,23 @@ held()
   "adw_resume.py": stub(
     "ADW Resume — continues an earlier Run.\n\nPhases: builder\n",
     { ...DESCRIBE_PLAIN, resumes: true },
-    "sys.exit(0)\n"),
+    `
+if "refuse me" in sys.argv:
+    print("no plan to build under", adw_id(), file=sys.stderr)
+    sys.exit(3)
+print("resuming", adw_id(), flush=True)
+held()
+# What session.ensure does when it joins a Run: its name and its process, then its work.
+now = datetime.now(timezone.utc).isoformat()
+with db() as c:
+    c.execute("UPDATE sessions SET adw_name = adw_name || ' + adw_resume', status = 'running' WHERE adw_id = ?",
+              (adw_id(),))
+    c.execute("INSERT INTO processes (adw_id, kind, name, pid, command, started_at) VALUES (?, 'adw', '', ?, ?, ?)",
+              (adw_id(), os.getpid(), " ".join(sys.argv), now))
+    c.execute("INSERT INTO phases (phase_id, adw_id, seq, name, kind, owner, status, started_at)"
+              " VALUES (?, ?, 1, 'build', 'agent', 'builder', 'success', ?)", (adw_id() + "_01_build", adw_id(), now))
+    c.execute("UPDATE sessions SET status = 'success' WHERE adw_id = ?", (adw_id(),))
+`),
 };
 
 /** An ADW from before --describe: argparse turns the unknown flag down. */
@@ -159,6 +175,14 @@ async function api<T>(r: Repo, path: string, body?: unknown): Promise<{ status: 
 
 async function launch(r: Repo, adw: string, values: Record<string, string | boolean>): Promise<Launch> {
   const done = await api<Launch>(r, "/api/launches", { adw, values });
+  expect(done.status).toBe(201);
+  return done.body;
+}
+
+/** Continue a Run the way its card does: preview, then launch exactly what it showed. */
+async function continueRun(r: Repo, adwId: string, adw: string, values: Record<string, string | boolean>): Promise<Launch> {
+  expect((await api(r, "/api/launches/preview", { adw, values, continues: adwId })).status).toBe(200);
+  const done = await api<Launch>(r, "/api/launches", { adw, values, continues: adwId });
   expect(done.status).toBe(201);
   return done.body;
 }
@@ -357,6 +381,97 @@ describe("a Launch", () => {
     // Only a process that outlived the first server can still finish its Run.
     expect(await until(async () => (await status()) === "success", 30)).toBe(true);
     expect((await api<string>(r, `/api/launches/${started.adw_id}/log`)).body).toContain("starting");
+  });
+});
+
+describe("Continue with…", () => {
+  /** A Run adw_ok started and finished, ready to be continued; the hold is back on after. */
+  async function settledRun(r: Repo): Promise<string> {
+    const started = await launch(r, "adw_ok", { prompt: "plan it" });
+    await settlesAs(r, started.adw_id, "started");
+    release(r.root);
+    const status = async () => (await api<SessionDetail>(r, `/api/sessions/${started.adw_id}`)).body.session?.status;
+    expect(await until(async () => (await status()) === "success", 30)).toBe(true);
+    hold(r.root);
+    return started.adw_id;
+  }
+
+  test("previews the Resuming ADW with that Run's adw_id", async () => {
+    const r = repo();
+    await startConsole(r);
+    const runId = await settledRun(r);
+    const { status, body } = await api<LaunchPreview>(r, "/api/launches/preview",
+      { adw: "adw_resume", values: { prompt: "build the plan" }, continues: runId });
+    expect(status).toBe(200);
+    expect(body.adw_id).toBe(runId);
+    expect(body.argv).toEqual(["uv", "run", "adws/adw_resume.py", "--adw-id", runId, "--", "build the plan"]);
+    expect(body.command).toBe(`uv run adws/adw_resume.py --adw-id ${runId} -- 'build the plan'`);
+  });
+
+  test("is Starting until the Resuming ADW joins the Run, and its work lands under the same Run", async () => {
+    const r = repo();
+    await startConsole(r);
+    const runId = await settledRun(r);
+    const continued = await continueRun(r, runId, "adw_resume", { prompt: "build the plan" });
+    expect(continued.adw_id).toBe(runId);
+    expect(continued.continuing).toBe(true);
+    expect(continued.state).toBe("starting");
+    expect(await until(async () =>
+      (await api<string>(r, `/api/launches/${runId}/log`)).body.includes("resuming"), 30)).toBe(true);
+    expect((await launchState(r, runId))?.state).toBe("starting");
+
+    release(r.root);
+    await settlesAs(r, runId, "started");
+    const { body } = await api<SessionDetail>(r, `/api/sessions/${runId}`);
+    expect(body.session.adw_name).toBe("adw_ok + adw_resume");
+    expect(body.phases.map((p) => p.name)).toEqual(["build"]);
+    expect((await api<unknown[]>(r, "/api/sessions")).body).toHaveLength(1);
+  });
+
+  test("that the Resuming ADW turns down is Refused, with only its own message", async () => {
+    const r = repo();
+    await startConsole(r);
+    const runId = await settledRun(r);
+    await continueRun(r, runId, "adw_resume", { prompt: "refuse me" });
+    const refused = await settlesAs(r, runId, "refused");
+    expect(refused.exit_code).toBe(3);
+    expect(refused.log_tail).toContain(`no plan to build under ${runId}`);
+    expect(refused.log_tail).not.toContain("starting");   // the first Run's output, earlier in the same log
+    expect((await api<string>(r, `/api/launches/${runId}/log`)).body).toContain(`starting ${runId}`);
+  });
+
+  test("takes only a Resuming ADW, and only for a Run that exists and has settled", async () => {
+    const r = repo();
+    await startConsole(r);
+    const runId = await settledRun(r);
+    const preview = (body: object) => api<{ error: string }>(r, "/api/launches/preview", body);
+
+    const fresh = await preview({ adw: "adw_ok", values: { prompt: "x" }, continues: runId });
+    expect(fresh.status).toBe(400);
+    expect(fresh.body.error).toContain("Resuming");
+    expect((await preview({ adw: "adw_resume", values: { prompt: "x" }, continues: "deadbeef" })).status).toBe(404);
+    expect((await preview({ adw: "adw_resume", values: { prompt: "x" }, continues: runId, adw_id: "beefbeef" }))
+      .status).toBe(400);
+
+    const live = await launch(r, "adw_ok", { prompt: "still going" });
+    await settlesAs(r, live.adw_id, "started");
+    const running = await preview({ adw: "adw_resume", values: { prompt: "x" }, continues: live.adw_id });
+    expect(running.status).toBe(409);
+    expect(running.body.error).toContain("running");
+  });
+
+  test("launches only the command its preview showed", async () => {
+    const r = repo();
+    await startConsole(r);
+    const runId = await settledRun(r);
+    const unseen = await api<{ error: string }>(r, "/api/launches",
+      { adw: "adw_resume", values: { prompt: "x" }, continues: runId });
+    expect(unseen.status).toBe(409);
+    expect(unseen.body.error).toContain("review");
+    await api(r, "/api/launches/preview", { adw: "adw_resume", values: { prompt: "x" }, continues: runId });
+    const changed = await api(r, "/api/launches", { adw: "adw_resume", values: { prompt: "y" }, continues: runId });
+    expect(changed.status).toBe(409);
+    expect((await launchState(r, runId))?.continuing).toBe(false);   // only the first Run's Launch
   });
 });
 

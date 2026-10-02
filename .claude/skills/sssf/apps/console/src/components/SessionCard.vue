@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
-import { Square } from 'lucide-vue-next'
+import { ChevronDown, Square } from 'lucide-vue-next'
 import type { EventRow, SessionSummary, StopReport } from '../lib/types'
 import { archiveSession, fetchEvents, stopRun } from '../lib/api'
 import { axisTicks, fmtDate, fmtOffset, ts } from '../lib/format'
 import { agentColor, dotColor, eventLabel } from '../lib/events'
 import { hrefFor } from '../lib/router'
+import { continuing, launches, resumingAdws } from '../lib/launches'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import PhaseDots from './PhaseDots.vue'
@@ -47,6 +48,22 @@ async function confirmStop() {
   } finally {
     stopStep.value = 'idle'
   }
+}
+
+// A settled Run can be picked up by a Resuming ADW, under its own adw_id: the
+// pick opens that ADW's form in the Launch pane, which reviews and launches it.
+const continueOpen = ref(false)
+
+// Not while a Launch for this Run is still Starting: the Run reads settled until its ADW joins.
+const continuable = computed(
+  () =>
+    resumingAdws.value.length > 0 &&
+    !launches.value.some((l) => l.adw_id === props.session.adw_id && l.state === 'starting'),
+)
+
+function continueWith(adw: string) {
+  continueOpen.value = false
+  continuing.value = { adwId: props.session.adw_id, adw }
 }
 
 // Each card tails its own event stream: one full fetch on mount, then the
@@ -221,22 +238,52 @@ const hiddenRowCount = computed(() =>
       ×
     </button>
     <!-- Clicks in here never navigate the card it sits in. -->
-    <span v-if="running || stopStep !== 'idle'" class="card-stop" @click.prevent.stop>
+    <span v-if="running || stopStep !== 'idle'" class="card-actions" @click.prevent.stop>
       <template v-if="stopStep === 'confirm'">
         <span class="stop-ask">Stop this Run?</span>
-        <button class="stop-btn stop-yes" type="button" @click="confirmStop">Stop</button>
-        <button class="stop-btn" type="button" @click="stopStep = 'idle'">Cancel</button>
+        <button class="action-btn stop-yes" type="button" @click="confirmStop">Stop</button>
+        <button class="action-btn" type="button" @click="stopStep = 'idle'">Cancel</button>
       </template>
       <span v-else-if="stopStep === 'stopping'" class="stop-ask">Stopping…</span>
       <button
         v-else
-        class="stop-btn"
+        class="action-btn stop-btn"
         type="button"
         title="Stop — kill its agents, then the ADW"
         @click="stopStep = 'confirm'"
       >
         <Square :size="14" :stroke-width="2.5" /> Stop
       </button>
+    </span>
+    <span
+      v-else-if="continuable"
+      class="card-actions"
+      @click.prevent.stop
+      @mouseleave="continueOpen = false"
+      @keydown.escape="continueOpen = false"
+    >
+      <button
+        class="action-btn continue-btn"
+        type="button"
+        title="Continue this Run with a Resuming ADW"
+        :aria-expanded="continueOpen"
+        @click="continueOpen = !continueOpen"
+      >
+        Continue with… <ChevronDown :size="14" :stroke-width="2.5" />
+      </button>
+      <span v-if="continueOpen" class="continue-menu" role="menu">
+        <button
+          v-for="a in resumingAdws"
+          :key="a.name"
+          type="button"
+          role="menuitem"
+          :disabled="!a.description"
+          :title="a.description ? a.summary : (a.error ?? '')"
+          @click="continueWith(a.name)"
+        >
+          {{ a.name }}
+        </button>
+      </span>
     </span>
     <span v-if="stopNotes.length" class="stop-notes" @click.prevent.stop="stopNotes = []">
       <span v-for="(note, i) in stopNotes" :key="i">{{ note }}</span>
@@ -352,7 +399,7 @@ const hiddenRowCount = computed(() =>
   color: #ff6f67;
 }
 
-.card-stop {
+.card-actions {
   /* Beside the archive button, always shown: a running Run's Stop is no triage click. */
   position: absolute;
   top: 10px;
@@ -368,7 +415,7 @@ const hiddenRowCount = computed(() =>
   color: var(--text);
 }
 
-.stop-btn {
+.action-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -390,6 +437,48 @@ const hiddenRowCount = computed(() =>
 
 .stop-yes:hover {
   background: rgba(255, 111, 103, 0.16);
+}
+
+.continue-btn:hover {
+  border-color: rgba(200, 155, 255, 0.6);
+  color: var(--purple);
+}
+
+.continue-menu {
+  /* Under its button, over the card's text, until an ADW is picked. */
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-3);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.continue-menu button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.continue-menu button:hover:not(:disabled) {
+  background: rgba(200, 155, 255, 0.14);
+}
+
+.continue-menu button:disabled {
+  color: var(--faint);
+  cursor: default;
 }
 
 .stop-notes {

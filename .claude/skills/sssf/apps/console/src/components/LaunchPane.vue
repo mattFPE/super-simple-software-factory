@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
-import type { AdwCatalog, AdwOption, LaunchPreview } from '../lib/types'
+import type { AdwOption, LaunchPreview, LaunchRequest } from '../lib/types'
 import { fetchAdws, previewLaunch, startLaunch } from '../lib/api'
-import { addLaunch } from '../lib/launches'
+import { addLaunch, catalog, continuing, resumingAdws } from '../lib/launches'
 import { messageOf } from '../lib/format'
 
 const LAST_ADW = 'sssf.console.last-adw'
 
-const catalog = shallowRef<AdwCatalog | null>(null)
 const loadError = ref<string | null>(null)
+const pane = ref<HTMLElement | null>(null)
 const chosen = ref('')
 // The form, split by kind so each input binds to a value of its own type.
 const texts = reactive<Record<string, string>>({})
@@ -17,9 +17,14 @@ const preview = shallowRef<LaunchPreview | null>(null)
 const formError = ref<string | null>(null)
 const busy = ref(false)
 
-/** Resuming ADWs continue an earlier Run, so they are never a fresh Launch. */
+/**
+ * Resuming ADWs continue an earlier Run, so they are never a fresh Launch:
+ * the picker offers them only while the form is continuing a Run.
+ */
 const launchable = computed(() =>
-  (catalog.value?.adws ?? []).filter((a) => !a.description?.resumes),
+  continuing.value
+    ? resumingAdws.value
+    : (catalog.value?.adws ?? []).filter((a) => !a.description?.resumes),
 )
 const adw = computed(() => launchable.value.find((a) => a.name === chosen.value) ?? null)
 
@@ -45,23 +50,41 @@ function remember(name: string): void {
   }
 }
 
+/** The fresh-Launch ADW: the one last chosen, else the first that can describe itself. */
+function freshChoice(): string {
+  const names = launchable.value.filter((a) => a.description).map((a) => a.name)
+  const last = remembered()
+  return last && names.includes(last) ? last : (names[0] ?? '')
+}
+
+function clearForm(): void {
+  for (const key of Object.keys(texts)) delete texts[key]
+  for (const key of Object.keys(flags)) delete flags[key]
+  preview.value = null
+  formError.value = null
+}
+
 onMounted(async () => {
   try {
     catalog.value = await fetchAdws()
-    const names = launchable.value.filter((a) => a.description).map((a) => a.name)
-    const last = remembered()
-    chosen.value = last && names.includes(last) ? last : (names[0] ?? '')
+    chosen.value = continuing.value?.adw ?? freshChoice()
   } catch (err) {
     loadError.value = messageOf(err)
   }
 })
 
 watch(chosen, (name) => {
-  for (const key of Object.keys(texts)) delete texts[key]
-  for (const key of Object.keys(flags)) delete flags[key]
-  preview.value = null
-  formError.value = null
-  if (name) remember(name)
+  clearForm()
+  // A Resuming ADW is picked per Run, so it never becomes the fresh-Launch default.
+  if (name && !continuing.value) remember(name)
+})
+
+// A card's "Continue with…" picked a Run and an ADW: the form takes both, and comes into view.
+watch(continuing, (next, before) => {
+  if (next?.adwId === before?.adwId && next?.adw === before?.adw) return
+  clearForm()
+  chosen.value = next ? next.adw : freshChoice()
+  if (next) pane.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 })
 
 /** A landing flag unchecks the others in its group: at most one may be set. */
@@ -97,19 +120,32 @@ async function submitting(work: () => Promise<void>): Promise<void> {
   }
 }
 
+function startFresh(): void {
+  continuing.value = null
+}
+
+/** A fresh Launch is matched to its preview by the id it minted; a continuing one by its Run's. */
+function request(adwId?: string): LaunchRequest {
+  const req: LaunchRequest = { adw: adw.value!.name, values: formValues() }
+  if (continuing.value) req.continues = continuing.value.adwId
+  else if (adwId) req.adw_id = adwId
+  return req
+}
+
 function review(): Promise<void> {
   return submitting(async () => {
     if (!adw.value) return
-    preview.value = await previewLaunch({ adw: adw.value.name, values: formValues() })
+    preview.value = await previewLaunch(request())
   })
 }
 
 function confirm(): Promise<void> {
   return submitting(async () => {
     if (!adw.value || !preview.value) return
-    addLaunch(await startLaunch({ adw: adw.value.name, values: formValues(), adw_id: preview.value.adw_id }))
+    addLaunch(await startLaunch(request(preview.value.adw_id)))
     preview.value = null
     for (const p of positionals.value) texts[p.name] = ''
+    continuing.value = null
   })
 }
 
@@ -118,8 +154,8 @@ const locked = computed(() => busy.value || preview.value !== null)
 </script>
 
 <template>
-  <section class="launch">
-    <h2 class="pane-title">Launch</h2>
+  <section ref="pane" class="launch">
+    <h2 class="pane-title">{{ continuing ? 'Continue' : 'Launch' }}</h2>
 
     <div v-if="loadError" class="error-bar">couldn't read this repo's ADWs — {{ loadError }}</div>
     <div v-else-if="!catalog" class="empty-state">reading this repo's ADWs…</div>
@@ -132,6 +168,17 @@ const locked = computed(() => busy.value || preview.value !== null)
     </div>
 
     <form v-else class="form" @submit.prevent="review">
+      <div v-if="continuing" class="continuing">
+        <span class="inline">
+          <span class="flag">--adw-id</span>
+          <span class="run-id">{{ continuing.adwId }}</span>
+        </span>
+        <span class="help">The Resuming ADW picks up this Run's work, under the same Run in the trace.</span>
+        <div>
+          <button type="button" :disabled="busy" @click="startFresh">Back to a fresh Launch</button>
+        </div>
+      </div>
+
       <label class="field">
         <span class="label">ADW</span>
         <select v-model="chosen" :disabled="locked">
@@ -269,6 +316,19 @@ const locked = computed(() => busy.value || preview.value !== null)
 
 .help {
   color: var(--faint);
+}
+
+.continuing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.run-id {
+  font-family: var(--mono);
+  color: var(--text);
 }
 
 .adw-about {

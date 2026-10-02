@@ -33,8 +33,7 @@ try {
   console.error(`[sssf] ${(error as Error).message}`);
   process.exit(1);
 }
-const launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir,
-  (adwId) => db.session(adwId) !== null);
+const launches = new Launches(resolveRepoRoot(dbPath), db.sessionsDir, db);
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

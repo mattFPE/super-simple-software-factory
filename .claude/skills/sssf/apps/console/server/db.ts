@@ -215,6 +215,22 @@ export class SssfDb {
     );
   }
 
+  /**
+   * How many ADW processes have run under this adw_id: each one, the first or
+   * one that joined later, records itself before its first phase. 0 on a db
+   * from before the processes table.
+   */
+  adwProcessCount(adwId: string): number {
+    if (!this.hasColumn("processes", "kind")) return 0;
+    return (
+      this.db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM processes WHERE adw_id = ? AND kind = 'adw'",
+        )
+        .get(adwId)?.n ?? 0
+    );
+  }
+
   phases(adwId: string): Phase[] {
     return this.db
       .query<Phase, [string]>(

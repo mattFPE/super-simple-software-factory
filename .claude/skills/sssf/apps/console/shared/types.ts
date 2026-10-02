@@ -370,6 +370,11 @@ export interface LaunchRequest {
   values: Record<string, string | boolean>;
   /** The id a preview minted; omitted, the launch mints one. */
   adw_id?: string;
+  /**
+   * The settled Run a Resuming ADW continues, under that Run's own adw_id.
+   * Such a Launch always needs its preview: there is no minted id to match.
+   */
+  continues?: string;
 }
 
 /** POST /api/launches/preview: what would run, so the engineer can confirm it. */
@@ -385,12 +390,16 @@ export interface LaunchPreview {
  * starting: the process is alive and has no session row yet.
  * refused: the process exited without ever writing one.
  * started: its session row exists, so it is an ordinary Run.
+ * A continuing Launch's Run already has a row, so for it read "row" as "its
+ * own process recorded in that Run's trace".
  */
 export type LaunchState = "starting" | "refused" | "started";
 
 /** GET /api/launches: the Launches this server started, newest first. In memory only. */
 export interface Launch extends LaunchPreview {
   adw: string;
+  /** A Resuming ADW continuing an existing Run: Starting until it joins that Run's trace. */
+  continuing: boolean;
   state: LaunchState;
   started_at: string;
   exit_code: number | null;
